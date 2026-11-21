@@ -1,0 +1,385 @@
+// cartography: drawing basemap tiles. In a map in Web Mercator each tile
+// file is drawn where it goes (a part of a tile further out stands in for
+// one not downloaded yet). In a map in any other system the tiles are
+// warped first, by `warpTiles`, into one picture in the map's system,
+// which the layer keeps in its `raster`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+/// Draws a tile layer on a map (`drawMap` calls it). In Web Mercator:
+/// the tiles on disk that the map shows; for one that isn't there yet, a
+/// tile up to six zooms further out that is (drawn under the others, so
+/// only its part where the missing tile goes shows). In other systems:
+/// the layer's warped picture (`layer.raster`, made by `warpTiles`). It
+/// changes nothing and downloads nothing (see `fetchTiles`).
+public fn drawTileLayer(_ g: Graphics, _ layer: Layer, _ m: Map) {
+    if layer.kind != .tiles || layer.opacity <= 0.0 {
+        return
+    }
+    if !isWebMercator(m.crs) {
+        drawPixels(g, layer.raster, m.vp, layer.opacity)
+        return
+    }
+    let v = m.vp
+    // The tiles that are here, and for each that isn't, the nearest tile
+    // further out that is (each once).
+    var here: [Tile] = []
+    var herePaths: [String] = []
+    var standIns: [Tile] = []
+    var standInPaths: [String] = []
+    var taken: Set<String> = []
+    for t in tilesFor(m, layer: layer, limit: 400) {
+        let path = tilePath(m, layer, t)
+        if fileExists(path) {
+            here.append(t)
+            herePaths.append(path)
+            continue
+        }
+        var levels = 1
+        while levels <= 6 && t.z - levels >= 0 {
+            let up = t.ancestor(levels)
+            let wide = tilePath(m, layer, up)
+            if fileExists(wide) {
+                let key = "{up.column} {wide}"
+                if !taken.contains(key) {
+                    taken.insert(key)
+                    standIns.append(up)
+                    standInPaths.append(wide)
+                }
+                break
+            }
+            levels += 1
+        }
+    }
+    if here.isEmpty && standIns.isEmpty {
+        return
+    }
+    // A see-through layer is drawn whole on its own first, then put on the
+    // map at its opacity: so tiles may overlap without showing darker.
+    let layered = layer.opacity < 1.0
+    if layered {
+        g.beginLayer(opacity: layer.opacity)
+    }
+    // Tiles further out first, the furthest first, under the tiles that
+    // are here; each a hair larger, so no seams show between them.
+    let hair = 0.35 / max(v.scale, 0.000000000001)
+    var order: [Int] = []
+    for k in 0..standIns.count {
+        order.append(k)
+    }
+    order = order.sorted(by: { a, b in standIns[a].z < standIns[b].z })
+    for k in order {
+        let _drawn = drawPicture(g, standInPaths[k], standIns[k].box().grown(by: hair), v, 1.0)
+    }
+    for k in 0..here.count {
+        let _drawn = drawPicture(g, herePaths[k], here[k].box().grown(by: hair), v, 1.0)
+    }
+    if layered {
+        g.endLayer()
+    }
+}
+
+/// The tiles of a tile layer that a map shows, warped into the map's
+/// system: one picture over the part of the map that shows, about one
+/// pixel to the Canvas's point (`density` pixels, at most `maxSize` on a
+/// side). Each pixel is taken back through the map's system to Web
+/// Mercator and colored from the tile there (or from a part of a tile
+/// further out, while it isn't downloaded); `smooth` blends the four tile
+/// pixels nearest it, rather than taking the nearest one. Where no tile is
+/// on disk, pixels are clear.
+///
+/// It gives an empty Raster in a map in Web Mercator (where tiles are
+/// drawn as they are) and for a layer that isn't a tile layer. Keep it in
+/// the layer, `m.layers[i].raster = warpTiles(m, m.layers[i])`, or let
+/// `warpTileLayers` do so for each tile layer.
+public fn warpTiles(_ m: Map, _ layer: Layer, density: Float = 1.0, maxSize: Int = 2048, smooth: Bool = false) -> Raster {
+    if layer.kind != .tiles || isWebMercator(m.crs) {
+        return Raster()
+    }
+    let seen = m.visible()
+    if seen.empty || !(seen.width() > 0.0) || !(seen.height() > 0.0) {
+        return Raster()
+    }
+    let tiles = tilesFor(m, layer: layer)
+    if tiles.isEmpty {
+        return Raster()
+    }
+    // The size of the picture: the visible box at `density` pixels a point.
+    let perUnit = m.vp.scale * max(density, 0.01)
+    var w = max(Int(ceil(seen.width() * perUnit - 0.01)), 1)
+    var h = max(Int(ceil(seen.height() * perUnit - 0.01)), 1)
+    let cap = max(maxSize, 16)
+    if w > cap || h > cap {
+        let k = Float(cap) / Float(max(w, h))
+        w = max(Int(Float(w) * k), 1)
+        h = max(Int(Float(h) * k), 1)
+    }
+    let z = tiles[0].z
+    let set = tileWarpSet(m, layer, tiles)
+    if set.offsets.isEmpty {
+        return Raster()
+    }
+    let n = tileCount(z)
+    let mercator = webMercator()
+    let (rcx, _) = geodesy.transform(m.vp.centerX, m.vp.centerY, from: m.crs, to: mercator)
+    let ref = if rcx.isFinite { tileUnitsOf(x: rcx, y: 0.0, zoom: z).0 } else { n / 2.0 }
+    let fromCrs = m.crs
+    let px = seen.width() / Float(w)
+    let py = seen.height() / Float(h)
+    // Where a point of the picture (in pixels from its top left corner) is
+    // on the tiles, in tile units: exactly, through the systems.
+    let place: fn(Float, Float) -> (Float, Float) = { u, v in
+        let x = seen.minX + u * px
+        let y = seen.maxY - v * py
+        let (mx, my) = geodesy.transform(x, y, from: fromCrs, to: mercator)
+        if !(mx.isFinite && my.isFinite) {
+            return (0.0 / 0.0, 0.0 / 0.0)
+        }
+        let (tx, ty) = tileUnitsOf(x: mx, y: my, zoom: z)
+        (tileUnwrap(tx, ref, n), ty)
+    }
+    // A coarse grid of exact places; pixels between them are interpolated.
+    let step = 16
+    let gw = (w + step - 1) / step + 1
+    let gh = (h + step - 1) / step + 1
+    var gx: [Float] = []
+    var gy: [Float] = []
+    for j in 0..gh {
+        let v = Float(min(j * step, h))
+        for i in 0..gw {
+            let (tx, ty) = place(Float(min(i * step, w)), v)
+            gx.append(tx)
+            gy.append(ty)
+        }
+    }
+    var pixels: [Int] = []
+    for _ in 0..(w * h) {
+        pixels.append(0)
+    }
+    for j in 0..(gh - 1) {
+        let v0 = j * step
+        let v1 = min(v0 + step, h)
+        if v0 >= h {
+            break
+        }
+        for i in 0..(gw - 1) {
+            let u0 = i * step
+            let u1 = min(u0 + step, w)
+            if u0 >= w {
+                break
+            }
+            let k00 = j * gw + i
+            let k10 = k00 + 1
+            let k01 = k00 + gw
+            let k11 = k01 + 1
+            let xs = [gx[k00], gx[k10], gx[k01], gx[k11]]
+            let ys = [gy[k00], gy[k10], gy[k01], gy[k11]]
+            var exact = false
+            for q in 0..4 {
+                if !(xs[q].isFinite && ys[q].isFinite) {
+                    exact = true
+                }
+            }
+            if !exact {
+                // (Corners far apart on the tiles: the cell crosses
+                // something the grid can't follow.)
+                let spread = max(abs(xs[0] - xs[3]), abs(ys[0] - ys[3]), abs(xs[1] - xs[2]), abs(ys[1] - ys[2]))
+                exact = spread > n / 4.0
+            }
+            let cw = Float(u1 - u0)
+            let ch = Float(v1 - v0)
+            for vv in v0..v1 {
+                let fy = (Float(vv) + 0.5 - Float(v0)) / ch
+                let lx = xs[0] + (xs[2] - xs[0]) * fy
+                let rx = xs[1] + (xs[3] - xs[1]) * fy
+                let ly = ys[0] + (ys[2] - ys[0]) * fy
+                let ry = ys[1] + (ys[3] - ys[1]) * fy
+                let row = vv * w
+                for uu in u0..u1 {
+                    var tx = 0.0
+                    var ty = 0.0
+                    if exact {
+                        let (ex, ey) = place(Float(uu) + 0.5, Float(vv) + 0.5)
+                        tx = ex
+                        ty = ey
+                        if !(tx.isFinite && ty.isFinite) {
+                            continue
+                        }
+                    } else {
+                        let fx = (Float(uu) + 0.5 - Float(u0)) / cw
+                        tx = lx + (rx - lx) * fx
+                        ty = ly + (ry - ly) * fx
+                    }
+                    pixels[row + uu] = tileSample(set, tx, ty, smooth)
+                }
+            }
+        }
+    }
+    let box = boxOf(minX: seen.minX, minY: seen.maxY - Float(h) * py, maxX: seen.minX + Float(w) * px, maxY: seen.maxY)
+    Raster(width: w, height: h, box: box, pixels: pixels, pixelWidth: w, pixelHeight: h, pixelBox: box)
+}
+
+/// Warps every visible tile layer of a map into its system (see
+/// `warpTiles`), keeping each picture in the layer's `raster`; in a map in
+/// Web Mercator it empties them. Returns whether any picture changed.
+public fn warpTileLayers(_ m: bind Map, density: Float = 1.0, smooth: Bool = false) -> Bool {
+    var changed = false
+    let denominator = m.scaleDenominator()
+    for i in 0..m.layers.count {
+        let layer = m.layers[i]
+        if layer.kind != .tiles {
+            continue
+        }
+        if !layer.visible || !layer.showsAt(denominator) || isWebMercator(m.crs) {
+            if !layer.raster.pixels.isEmpty {
+                m.layers[i].raster = Raster()
+                changed = true
+            }
+            continue
+        }
+        let r = warpTiles(m, layer, density: density, smooth: smooth)
+        if r.pixels != layer.raster.pixels || r.pixelBox != layer.raster.pixelBox {
+            m.layers[i].raster = r
+            changed = true
+        }
+    }
+    changed
+}
+
+// The tiles a picture is warped from, side by side in one list: for each
+// place of the grid `columns` × `rows` from (`column0`, `row0`), where its
+// pixels start in `pixels` (-1: none on disk), how many on a side, and,
+// when a tile further out stands in, how many zooms out (`shifts`) and
+// which tile it is (`ax`, `ay`).
+private struct TileWarpSet {
+    column0: Int = 0
+    row0: Int = 0
+    columns: Int = 0
+    rows: Int = 0
+    pixels: [Int] = []
+    offsets: [Int] = []
+    sides: [Int] = []
+    scales: [Float] = []
+    ax: [Float] = []
+    ay: [Float] = []
+}
+
+// Reads the tiles (or parts of tiles further out) that are on disk.
+private fn tileWarpSet(_ m: Map, _ layer: Layer, _ tiles: [Tile]) -> TileWarpSet {
+    var c0 = tiles[0].column
+    var c1 = c0
+    var r0 = tiles[0].y
+    var r1 = r0
+    for t in tiles {
+        c0 = min(c0, t.column)
+        c1 = max(c1, t.column)
+        r0 = min(r0, t.y)
+        r1 = max(r1, t.y)
+    }
+    var set = TileWarpSet(column0: c0, row0: r0, columns: c1 - c0 + 1, rows: r1 - r0 + 1)
+    let count = set.columns * set.rows
+    for _ in 0..count {
+        set.offsets.append(-1)
+        set.sides.append(0)
+        set.scales.append(1.0)
+        set.ax.append(0.0)
+        set.ay.append(0.0)
+    }
+    // Each picture read once, though it stands in for several tiles.
+    var readAt: [String: Int] = [:]
+    var sideOf: [String: Int] = [:]
+    var any = false
+    for t in tiles {
+        let slot = (t.column - c0) + (t.y - r0) * set.columns
+        var levels = 0
+        while levels <= 6 && t.z - levels >= 0 {
+            let up = t.ancestor(levels)
+            let path = tilePath(m, layer, up)
+            var at = readAt[path] ?? -2
+            if at == -2 && fileExists(path) {
+                at = -1
+                if let (pw, ph, px) = readImage(path) {
+                    if pw == ph && pw > 0 && px.count >= pw * ph {
+                        at = set.pixels.count
+                        set.pixels.appendAll(px)
+                        sideOf[path] = pw
+                    }
+                }
+                readAt[path] = at
+            }
+            if at >= 0 {
+                set.offsets[slot] = at
+                set.sides[slot] = sideOf[path] ?? 0
+                set.scales[slot] = 1.0 / Float(1 << levels)
+                set.ax[slot] = Float(up.column)
+                set.ay[slot] = Float(up.y)
+                any = true
+                break
+            }
+            levels += 1
+        }
+    }
+    if !any {
+        set.offsets = []
+    }
+    set
+}
+
+// The color at a place on the tiles (in tile units), or clear.
+private fn tileSample(_ set: TileWarpSet, _ tx: Float, _ ty: Float, _ smooth: Bool) -> Int {
+    let col = Int(floor(tx)) - set.column0
+    let row = Int(floor(ty)) - set.row0
+    if col < 0 || row < 0 || col >= set.columns || row >= set.rows {
+        return 0
+    }
+    let slot = col + row * set.columns
+    let start = set.offsets[slot]
+    if start < 0 {
+        return 0
+    }
+    let side = set.sides[slot]
+    let k = set.scales[slot]
+    let fs = Float(side)
+    let u = (tx * k - set.ax[slot]) * fs
+    let v = (ty * k - set.ay[slot]) * fs
+    if !smooth {
+        let iu = Int(u).clamped(min: 0, max: side - 1)
+        let iv = Int(v).clamped(min: 0, max: side - 1)
+        return set.pixels[start + iv * side + iu]
+    }
+    // The four pixels around, blended by how near each is.
+    let su = u - 0.5
+    let sv = v - 0.5
+    let fu = floor(su)
+    let fv = floor(sv)
+    let wu = su - fu
+    let wv = sv - fv
+    let a = Int(fu).clamped(min: 0, max: side - 1)
+    let b = (Int(fu) + 1).clamped(min: 0, max: side - 1)
+    let c = Int(fv).clamped(min: 0, max: side - 1)
+    let d = (Int(fv) + 1).clamped(min: 0, max: side - 1)
+    let p00 = set.pixels[start + c * side + a]
+    let p10 = set.pixels[start + c * side + b]
+    let p01 = set.pixels[start + d * side + a]
+    let p11 = set.pixels[start + d * side + b]
+    if p00 == p10 && p00 == p01 && p00 == p11 {
+        return p00
+    }
+    var out = 0
+    var shift = 24
+    while shift >= 0 {
+        let q00 = Float((p00 >> shift) & 255)
+        let q10 = Float((p10 >> shift) & 255)
+        let q01 = Float((p01 >> shift) & 255)
+        let q11 = Float((p11 >> shift) & 255)
+        let top = q00 + (q10 - q00) * wu
+        let bottom = q01 + (q11 - q01) * wu
+        let value = Int(round(top + (bottom - top) * wv)).clamped(min: 0, max: 255)
+        out = out | (value << shift)
+        shift -= 8
+    }
+    out
+}
