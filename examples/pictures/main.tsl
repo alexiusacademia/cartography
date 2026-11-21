@@ -1,0 +1,130 @@
+// Draws the pictures in cartography's README (docs/*.png) from the sample
+// data in examples/data and the test rasters. Run it from the library
+// folder: `tessel run examples/pictures`. The basemap picture downloads a
+// few OpenStreetMap tiles.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../.."
+import geodesy
+
+fn layersOf(_ path: String) -> [cartography.Layer] {
+    match cartography.readLayers(path) {
+        .ok(layers) -> layers
+        .failure(e) -> {
+            print(e.message)
+            exit(1)
+            []
+        }
+    }
+}
+
+// The world in Equal Earth: countries by continent, rivers, and the
+// largest cities labeled.
+fn world() {
+    var m = cartography.Map(crs: geodesy.epsg(8857) ?? cartography.lonLat(), background: .rgb(214, 232, 245))
+    var countries = layersOf("examples/data/countries.geojson")[0]
+    countries.style = cartography.categorizedStyle(layer: countries, field: "CONTINENT", ramp: "")
+    for i in 0..countries.style.classes.count {
+        countries.style.classes[i].symbol.stroke = cartography.rgb(255, 255, 255)
+        countries.style.classes[i].symbol.strokeWidth = 0.5
+    }
+    m.add(countries)
+    var rivers = layersOf("examples/data/rivers.geojson")[0]
+    rivers.style.symbol = cartography.Symbol(stroke: cartography.rgb(70, 130, 200), strokeWidth: 1.0)
+    m.add(rivers)
+    var places = layersOf("examples/data/places.geojson")[0]
+    let pop = places.columnIndex("POP_MAX") ?? 0
+    places.hidden = places.columns[pop].nums.map { p in p < 8000000.0 }
+    places.style.symbol = cartography.Symbol(fill: cartography.rgb(40, 40, 40), stroke: cartography.rgb(255, 255, 255), size: 5)
+    places.labels = cartography.LabelStyle(enabled: true, field: "NAME", size: 10)
+    m.add(places)
+    m.vp.resize(1000, 520)
+    m.vp.smooth = false
+    m.fitAll()
+    save(m, "world", 1000, 520, legend: true)
+}
+
+// Population by country, in five natural-breaks classes.
+fn choropleth() {
+    var m = cartography.Map(crs: geodesy.epsg(8857) ?? cartography.lonLat(), background: .rgb(245, 245, 245))
+    var countries = layersOf("examples/data/countries.geojson")[0]
+    countries.style = cartography.graduatedStyle(layer: countries, field: "POP_EST", mode: .naturalBreaks, count: 5, ramp: "YlOrRd")
+    for i in 0..countries.style.classes.count {
+        countries.style.classes[i].symbol.stroke = cartography.rgb(120, 120, 120)
+        countries.style.classes[i].symbol.strokeWidth = 0.4
+        let c = countries.style.classes[i]
+        countries.style.classes[i].label = "{millions(c.lower)} – {millions(c.upper)} M"
+    }
+    countries.name = "Population"
+    m.add(countries)
+    m.vp.resize(1000, 520)
+    m.vp.smooth = false
+    m.fitAll()
+    save(m, "population", 1000, 520, legend: true)
+}
+
+fn millions(_ x: Float) -> String {
+    cartography.formatNumber(round(x / 100000.0) / 10.0, decimals: 1)
+}
+
+// A DEM colored by height over its hillshade, with contours.
+fn terrain() {
+    var m = cartography.Map()
+    var dem = layersOf("tests/data/raster/dem.tif")[0]
+    let shade = cartography.hillshade(dem, exaggeration: 2.0)
+    dem.name = "Elevation (m)"
+    dem.rasterStyle = cartography.rampRasterStyle(dem, ramp: "Terrain")
+    dem.opacity = 0.75
+    var hills = shade
+    hills.rasterStyle.look = .gray
+    hills.rasterStyle.low = 0
+    hills.rasterStyle.high = 255
+    m.add(hills)
+    m.add(dem)
+    var lines = cartography.contours(dem, interval: 25)
+    lines.style.symbol = cartography.Symbol(stroke: cartography.Rgba(r: 60, g: 40, b: 20, a: 0.6), strokeWidth: 0.8)
+    lines.labels = cartography.LabelStyle(enabled: true, field: "elev", size: 9, color: cartography.rgb(80, 50, 20), curved: true)
+    m.add(lines)
+    m.vp.resize(700, 520)
+    m.vp.smooth = false
+    m.fitAll()
+    save(m, "terrain", 700, 520, legend: true)
+}
+
+fn save(_ m: cartography.Map, _ name: String, _ w: Float, _ h: Float, legend: Bool) {
+    let path = "docs/{name}.png"
+    let ok = renderImage(path: path, width: w, height: h, scale: 2) { g in
+        m.draw(g)
+        if legend {
+            let _size = cartography.drawLegend(g, m, x: 12, y: 12)
+        }
+        cartography.drawMapScaleBar(g, m, x: 16, y: h - 16)
+    }
+    print("{path}: {ok}")
+}
+
+// OpenStreetMap under Manila's towns, fetched as MapView would.
+fn basemap() {
+    var m = cartography.Map()
+    m.add(cartography.openStreetMap())
+    var places = layersOf("examples/data/places.geojson")[0]
+    places.style.symbol = cartography.Symbol(fill: cartography.rgb(220, 40, 40), size: 9, marker: .star)
+    places.labels = cartography.LabelStyle(enabled: true, field: "NAME", size: 12, bold: true)
+    m.add(places)
+    m.vp.resize(800, 500)
+    m.vp.smooth = false
+    m.centerOn(lon: 121.0, lat: 14.6, scale: 4000000)
+    let _started = cartography.fetchTiles(m) { paths in
+        print("{paths.count} tiles")
+        save(m, "basemap", 800, 500, legend: false)
+    }
+}
+
+fn main() {
+    world()
+    choropleth()
+    terrain()
+    basemap()
+}

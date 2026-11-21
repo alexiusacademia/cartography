@@ -1,0 +1,6 @@
+# The README's pictures: `tessel run examples/pictures` from the library folder.
+tessel = "0.24.0"
+
+[dependencies]
+geodesy = "0.2"
+viewport = "0.1"
