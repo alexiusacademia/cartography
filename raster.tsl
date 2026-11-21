@@ -1,11 +1,633 @@
-// cartography: rasters (stub, replaced by the raster builder).
+// cartography: rasters, grids of values (elevation models, satellite
+// bands, scanned maps) as layers. This file reads them (`readRaster` picks
+// the reader by the file's extension), makes raster layers, and gives the
+// values at a point. Ported from Meridian's raster/read.tsl.
+//
+// A raster layer is a `Layer` of kind `.raster` whose `raster` holds the
+// cells: `bands` of `width` × `height` values each, row by row from the
+// top left, with NaN where there is nothing; `box` is where the outer
+// edges of the cells are, in the layer's CRS.
+//
+// The raster files:
+//   raster.tsl          readRaster; ASCII grids, SRTM .hgt, pictures with a
+//                       world file; world files and .prj files; values
+//   raster_tiff.tsl     GeoTIFF
+//   raster_lzw.tsl      LZW and PackBits, for TIFF
+//   raster_write.tsl    writing GeoTIFF and ASCII grids
+//   raster_render.tsl   renderRaster: the pixels a raster layer is drawn with
+//   raster_terrain.tsl  hillshade, slope and aspect
+//   raster_contour.tsl  contour lines
+//   raster_stats.tsl    statistics, histograms, zonal statistics, sampling
 //
 // Author: Alexius Academia
 // Date: 2026-11-22
 
 import geodesy
 
-/// The layer's raster with its pixels made for a map in `crs`.
-public fn renderRaster(_ layer: Layer, _ crs: geodesy.Crs) -> Raster {
-    layer.raster
+/// A raster layer as it was read from a file, and what the reader has to
+/// say about it: "read at 1/3 of its resolution", "no CRS in the file;
+/// taken to be WGS 84", …
+public struct RasterFile {
+    layer: Layer = Layer()
+    notes: [String] = []
+}
+
+/// The extensions of the files `readRaster` reads (lower case, no dot).
+public fn rasterExtensions() -> [String] {
+    ["tif", "tiff", "asc", "hgt", "png", "jpg", "jpeg"]
+}
+
+/// Reads a raster file as a layer: GeoTIFF (`.tif`, `.tiff`), an ESRI
+/// ASCII grid (`.asc`), SRTM elevations (`.hgt`), or a picture (`.png`,
+/// `.jpg`, `.jpeg`) with a world file beside it. The layer's style is the
+/// one `defaultRasterStyle` gives. A raster of more than `maxCells` cells
+/// is read at every n-th row and column, and its name says so.
+public fn readRaster(_ path: String, maxCells: Int = 16_000_000) -> Result<Layer> {
+    let file = try readRasterFile(path, maxCells: maxCells)
+    Result.ok(value: file.layer)
+}
+
+/// Like `readRaster`, with the notes the reader made: that the file was
+/// read at a lower resolution, has no CRS, …
+public fn readRasterFile(_ path: String, maxCells: Int = 16_000_000) -> Result<RasterFile> {
+    let most = max(1, maxCells)
+    let ext = path.fileExtension.lowercase()
+    var file = RasterFile()
+    if ext == "tif" || ext == "tiff" {
+        file = try rasTifRead(path, maxCells: most)
+    } else if ext == "asc" {
+        file = try rasReadAsciiGrid(path, maxCells: most)
+    } else if ext == "hgt" {
+        file = try rasReadHgt(path)
+    } else if ext == "png" || ext == "jpg" || ext == "jpeg" {
+        file = try rasReadPicture(path)
+    } else if ext == "" {
+        return .failure(error: Error("{path.fileName} has no extension, so cartography can't tell what kind of raster it is"))
+    } else {
+        return .failure(error: Error("cartography can't read .{ext} files as rasters"))
+    }
+    file.layer.rasterStyle = defaultRasterStyle(file.layer)
+    Result.ok(value: file)
+}
+
+/// Reads a GeoTIFF file (`.tif`) as a raster layer: strips or tiles,
+/// packed with LZW, Deflate or PackBits or not at all, whole numbers of 8,
+/// 16 or 32 bits or decimal numbers, any number of bands. Its CRS comes from
+/// the GeoTIFF keys (or a `.prj` beside it), and cells with the no-data
+/// value GDAL writes are NaN.
+public fn readGeoTIFF(_ path: String) -> Result<Layer> {
+    var file = try rasTifRead(path, maxCells: 16_000_000)
+    file.layer.rasterStyle = defaultRasterStyle(file.layer)
+    Result.ok(value: file.layer)
+}
+
+/// Reads an ESRI ASCII grid (`.asc`): a few lines like `ncols 4`, then the
+/// values row by row from the top. The `.prj` beside it gives the CRS
+/// (WGS 84 without one).
+public fn readAsciiGrid(_ path: String) -> Result<Layer> {
+    var file = try rasReadAsciiGrid(path, maxCells: 16_000_000)
+    file.layer.rasterStyle = defaultRasterStyle(file.layer)
+    Result.ok(value: file.layer)
+}
+
+/// Reads SRTM elevations (`.hgt`): a square of 1201 × 1201 or 3601 × 3601
+/// cells whose file name (like `N14E121.hgt`) says where it is.
+public fn readHGT(_ path: String) -> Result<Layer> {
+    var file = try rasReadHgt(path)
+    file.layer.rasterStyle = defaultRasterStyle(file.layer)
+    Result.ok(value: file.layer)
+}
+
+/// Reads a PNG or JPEG picture with a world file beside it (`.pgw`,
+/// `.jgw`, `.wld`) as a raster of three bands: red, green and blue from 0
+/// to 255 (see-through pixels have no value). The `.prj` beside it gives
+/// the CRS (WGS 84 without one).
+public fn readWorldPicture(_ path: String) -> Result<Layer> {
+    var file = try rasReadPicture(path)
+    file.layer.rasterStyle = defaultRasterStyle(file.layer)
+    Result.ok(value: file.layer)
+}
+
+/// A raster layer around a raster in the CRS `crs`, with the style
+/// `defaultRasterStyle` gives it.
+public fn rasterLayer(name: String, raster: Raster, crs: geodesy.Crs) -> Layer {
+    var layer = Layer(name: name, kind: .raster, crs: crs)
+    layer.raster = raster
+    layer.rasterStyle = defaultRasterStyle(layer)
+    layer
+}
+
+/// A raster made from values: `bands` of `width` × `height` numbers each,
+/// row by row from the top left, over `box`. Cells equal to `noData` are
+/// made NaN; the smallest and largest value of each band are worked out.
+public fn makeRaster(width: Int, height: Int, bands: [[Float]], box: Box, noData: Float = 0.0 / 0.0) -> Raster {
+    var lows: [Float] = []
+    var highs: [Float] = []
+    var clean: [[Float]] = []
+    for b in bands {
+        var band = b
+        if !noData.isNaN {
+            for i in 0..band.count {
+                if band[i] == noData {
+                    band[i] = 0.0 / 0.0
+                }
+            }
+        }
+        let (lo, hi) = rasRange(band)
+        lows.append(lo)
+        highs.append(hi)
+        clean.append(band)
+    }
+    Raster(width: width, height: height, bands: clean, box: box, noData: noData, lows: lows, highs: highs)
+}
+
+/// The value of band `band` (from 0) at a point (`x`, `y` in the layer's
+/// CRS): the value of the cell the point is in; NaN outside the raster or
+/// where the cell has no value.
+public fn rasterValue(_ layer: Layer, _ x: Float, _ y: Float, band: Int = 0) -> Float {
+    let r = layer.raster
+    let i = rasCellIndex(r, x, y)
+    if i < 0 || band < 0 || band >= r.bands.count || i >= r.bands[band].count {
+        return 0.0 / 0.0
+    }
+    r.bands[band][i]
+}
+
+/// Every band's value at a point (in the layer's CRS): empty outside the
+/// raster, NaN where a band has nothing.
+public fn rasterValues(_ layer: Layer, _ x: Float, _ y: Float) -> [Float] {
+    let r = layer.raster
+    var out: [Float] = []
+    let i = rasCellIndex(r, x, y)
+    if i < 0 {
+        return out
+    }
+    for b in r.bands {
+        out.append(if i < b.count { b[i] } else { 0.0 / 0.0 })
+    }
+    out
+}
+
+/// The size of a raster's cells (width, height) in its layer's units.
+public fn rasterCellSize(_ r: Raster) -> (Float, Float) {
+    (r.box.width() / Float(max(1, r.width)), r.box.height() / Float(max(1, r.height)))
+}
+
+// The place in a band of the cell that holds a point, or -1 outside.
+fn rasCellIndex(_ r: Raster, _ x: Float, _ y: Float) -> Int {
+    if r.width <= 0 || r.height <= 0 || r.box.empty || !x.isFinite || !y.isFinite {
+        return -1
+    }
+    if x < r.box.minX || x > r.box.maxX || y < r.box.minY || y > r.box.maxY {
+        return -1
+    }
+    let col = min(r.width - 1, Int(floor((x - r.box.minX) / r.box.width() * Float(r.width))))
+    let row = min(r.height - 1, Int(floor((r.box.maxY - y) / r.box.height() * Float(r.height))))
+    row * r.width + col
+}
+
+// A file's name without its folder and extension.
+fn rasStem(_ path: String) -> String {
+    let name = path.fileName
+    let ext = name.fileExtension
+    if ext == "" {
+        return name
+    }
+    name.substring(from: 0, to: name.count - ext.count - 1)
+}
+
+// The path with another extension.
+fn rasSibling(_ path: String, _ ext: String) -> String {
+    let old = path.fileExtension
+    if old == "" {
+        return path + "." + ext
+    }
+    path.substring(from: 0, to: path.count - old.count) + ext
+}
+
+// A CRS from any text geodesy reads (EPSG:n, PROJ, WKT), or nil.
+fn rasCrsFromText(_ text: String) -> geodesy.Crs? {
+    match geodesy.crs(text) {
+        .ok(c) -> c
+        .failure(_) -> nil
+    }
+}
+
+// The CRS of the `.prj` file beside a file, if there is one that can be
+// understood.
+fn rasSidecarCrs(_ path: String) -> geodesy.Crs? {
+    for ext in ["prj", "PRJ"] {
+        if let text = readFile(rasSibling(path, ext)) {
+            if let crs = rasCrsFromText(text) {
+                return crs
+            }
+        }
+    }
+    nil
+}
+
+// What a world file says: the map coordinates of the picture's left
+// edge and of the center of its first row, and the size of a cell.
+// `flipped`: the rows go up the map rather than down.
+struct RasWorld {
+    found: Bool = false
+    left: Float = 0.0
+    firstY: Float = 0.0
+    cellX: Float = 1.0
+    cellY: Float = 1.0
+    flipped: Bool = false
+    error: String = ""
+}
+
+// Reads the world file beside a picture: six lines with the width of a
+// cell, two rotations, the height of a cell (negative), and the x and y
+// of the center of the top left cell. Its extension is the first and last
+// letter of the picture's with a `w` (`.tfw`, `.pgw`, `.jgw`), or the
+// picture's with a `w` added (`.tifw`), or `.wld`.
+fn rasWorldFile(_ path: String) -> RasWorld {
+    let ext = path.fileExtension.lowercase()
+    var names: [String] = []
+    if ext.count >= 2 {
+        let c = ext.characters
+        names.append(c[0] + c[c.count - 1] + "w")
+    }
+    names.append(ext + "w")
+    names.append("wld")
+    if ext == "tiff" {
+        names.append("tifw")
+    }
+    if ext == "jpeg" {
+        names.append("jpgw")
+    }
+    for name in names {
+        for e in [name, name.uppercase()] {
+            if let text = readFile(rasSibling(path, e)) {
+                var nums: [Float] = []
+                for line in text.lines() {
+                    let t = line.trim()
+                    if t == "" {
+                        continue
+                    }
+                    if let x = Float(t.replace(",", with: ".")) {
+                        nums.append(x)
+                    }
+                }
+                if nums.count < 6 {
+                    return RasWorld(error: "has a world file (.{e}) that doesn't hold six numbers")
+                }
+                if nums[1] != 0.0 || nums[2] != 0.0 {
+                    return RasWorld(error: "has a world file (.{e}) that rotates it, which cartography can't show yet")
+                }
+                if nums[0] <= 0.0 || nums[3] == 0.0 {
+                    return RasWorld(error: "has a world file (.{e}) that mirrors it, which cartography can't show yet")
+                }
+                let cellX = nums[0]
+                return RasWorld(found: true, left: nums[4] - cellX / 2.0, firstY: nums[5], cellX: cellX, cellY: abs(nums[3]),
+                                flipped: nums[3] > 0.0)
+            }
+        }
+    }
+    RasWorld()
+}
+
+// The smallest and largest number of a band (NaN and infinity aside);
+// NaN, NaN if it has none.
+fn rasRange(_ band: [Float]) -> (Float, Float) {
+    var lo = 1.0 / 0.0
+    var hi = -1.0 / 0.0
+    for v in band {
+        if v.isFinite {
+            if v < lo { lo = v }
+            if v > hi { hi = v }
+        }
+    }
+    if lo > hi {
+        return (0.0 / 0.0, 0.0 / 0.0)
+    }
+    (lo, hi)
+}
+
+// The smallest and largest value of band `b` of a raster: what the raster
+// says in `lows` and `highs`, or worked out if it doesn't.
+fn rasBandRange(_ r: Raster, _ b: Int) -> (Float, Float) {
+    if b < r.lows.count && b < r.highs.count && r.lows[b].isFinite && r.highs[b].isFinite {
+        return (r.lows[b], r.highs[b])
+    }
+    if b >= 0 && b < r.bands.count {
+        return rasRange(r.bands[b])
+    }
+    (0.0 / 0.0, 0.0 / 0.0)
+}
+
+// A raster of one band over a box.
+fn rasOneBand(_ values: [Float], width: Int, height: Int, box: Box) -> Raster {
+    let (lo, hi) = rasRange(values)
+    Raster(width: width, height: height, bands: [values], box: box, lows: [lo], highs: [hi])
+}
+
+// ----- ESRI ASCII grid -----
+
+fn rasIsSpace(_ b: Int) -> Bool {
+    b == 32 || b == 10 || b == 13 || b == 9
+}
+
+// Reads an ESRI ASCII grid.
+fn rasReadAsciiGrid(_ path: String, maxCells: Int) -> Result<RasterFile> {
+    let d = try readBytes(path)
+    let name = path.fileName
+    let n = d.count
+    var pos = 0
+    var header: [String: Float] = [:]
+    // The header: words followed by a number, until a line starts with a number.
+    while pos < n {
+        while pos < n && rasIsSpace(d[pos]) {
+            pos += 1
+        }
+        if pos >= n {
+            break
+        }
+        let b = d[pos]
+        let letter = (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+        if !letter {
+            break
+        }
+        var end = pos
+        while end < n && !rasIsSpace(d[end]) {
+            end += 1
+        }
+        let key = (d.slice(from: pos, to: end).text ?? "").lowercase()
+        pos = end
+        while pos < n && rasIsSpace(d[pos]) {
+            pos += 1
+        }
+        end = pos
+        while end < n && !rasIsSpace(d[end]) {
+            end += 1
+        }
+        let word = d.slice(from: pos, to: end).text ?? ""
+        pos = end
+        if let x = Float(word.replace(",", with: ".")) {
+            header[key] = x
+        } else {
+            return .failure(error: Error("{name} isn't an ASCII grid: \"{word}\" after {key} isn't a number"))
+        }
+    }
+    let w = Int(header["ncols"] ?? 0.0)
+    let h = Int(header["nrows"] ?? 0.0)
+    if w <= 0 || h <= 0 {
+        return .failure(error: Error("{name} isn't an ASCII grid: it doesn't start with ncols and nrows"))
+    }
+    if w > 2_000_000 || h > 2_000_000 {
+        return .failure(error: Error("{name} says it has {w} × {h} cells, which is more than cartography can read"))
+    }
+    let cellX = header["dx"] ?? (header["cellsize"] ?? 0.0)
+    let cellY = header["dy"] ?? (header["cellsize"] ?? 0.0)
+    if !(cellX > 0.0) || !(cellY > 0.0) {
+        return .failure(error: Error("{name} doesn't say how big its cells are (cellsize)"))
+    }
+    var left = header["xllcorner"] ?? 0.0
+    var bottom = header["yllcorner"] ?? 0.0
+    if let x = header["xllcenter"] {
+        left = x - cellX / 2.0
+    }
+    if let y = header["yllcenter"] {
+        bottom = y - cellY / 2.0
+    }
+    let none = 0.0 / 0.0
+    let noData = header["nodata_value"] ?? -9999.0
+
+    var notes: [String] = []
+    var step = 1
+    var off = 0
+    var outW = w
+    var outH = h
+    while outW * outH > maxCells {
+        step += 1
+        off = step / 2
+        outW = (w - off + step - 1) / step
+        outH = (h - off + step - 1) / step
+    }
+    if step > 1 {
+        notes.append("{name} has {w} × {h} cells: read at 1/{step} of its resolution ({outW} × {outH})")
+    }
+
+    var tens: [Float] = [1.0]
+    for _ in 0..22 {
+        tens.append((tens.last ?? 1.0) * 10.0)
+    }
+    var values: [Float] = []
+    var lo = 1.0 / 0.0
+    var hi = -1.0 / 0.0
+    let total = w * h
+    var index = 0
+    while index < total {
+        while pos < n && rasIsSpace(d[pos]) {
+            pos += 1
+        }
+        if pos >= n {
+            break
+        }
+        // A plain number (a sign, digits, a point, digits) is worked out
+        // here, exactly; anything else is left to Float().
+        let start = pos
+        var negative = false
+        if d[pos] == 45 {
+            negative = true
+            pos += 1
+        } else if d[pos] == 43 {
+            pos += 1
+        }
+        var mantissa = 0
+        var digits = 0
+        var decimals = 0
+        var seenPoint = false
+        var plain = true
+        while pos < n {
+            let b = d[pos]
+            if b >= 48 && b <= 57 {
+                mantissa = mantissa * 10 + (b - 48)
+                digits += 1
+                if seenPoint {
+                    decimals += 1
+                }
+                if digits > 15 {
+                    plain = false
+                    break
+                }
+            } else if (b == 46 || b == 44) && !seenPoint {
+                seenPoint = true
+            } else if rasIsSpace(b) {
+                break
+            } else {
+                plain = false
+                break
+            }
+            pos += 1
+        }
+        var v = 0.0
+        if plain && digits > 0 {
+            v = Float(mantissa) / tens[decimals]
+            if negative {
+                v = -v
+            }
+        } else {
+            while pos < n && !rasIsSpace(d[pos]) {
+                pos += 1
+            }
+            let word = d.slice(from: start, to: pos).text ?? ""
+            if let x = Float(word.replace(",", with: ".")) {
+                v = x
+            } else {
+                return .failure(error: Error("{name}: \"{word}\" (value {index + 1}) isn't a number"))
+            }
+        }
+        let row = index / w
+        let col = index % w
+        index += 1
+        if step > 1 && (row % step != off || col % step != off) {
+            continue
+        }
+        if v == noData || v.isNaN {
+            values.append(none)
+        } else {
+            values.append(v)
+            if v < lo { lo = v }
+            if v > hi { hi = v }
+        }
+    }
+    if index < total {
+        return .failure(error: Error("{name} is cut short: it has {index} values where {w} × {h} are needed"))
+    }
+    let box = boxOf(minX: left, minY: bottom + Float(h) * cellY - Float(outH * step) * cellY,
+                    maxX: left + Float(outW * step) * cellX, maxY: bottom + Float(h) * cellY)
+    var crs = geodesy.wgs84Crs()
+    if let found = rasSidecarCrs(path) {
+        crs = found
+    } else {
+        notes.append("{name} has no .prj file beside it: taken to be WGS 84")
+    }
+    var layer = Layer(name: rasStem(path) + (if step > 1 { " (1/{step} resolution)" } else { "" }),
+                      kind: .raster, source: path, crs: crs)
+    layer.raster = Raster(width: outW, height: outH, bands: [values], box: box, noData: noData,
+                          lows: [if lo <= hi { lo } else { none }], highs: [if lo <= hi { hi } else { none }])
+    Result.ok(value: RasterFile(layer: layer, notes: notes))
+}
+
+// ----- SRTM .hgt -----
+
+// Reads SRTM elevations: a square of 16-bit numbers (most significant byte
+// first), one degree wide, whose name says where its lower left cell's
+// center is.
+fn rasReadHgt(_ path: String) -> Result<RasterFile> {
+    let d = try readBytes(path)
+    let name = path.fileName
+    let stem = Data(text: rasStem(path).uppercase())
+    var ok = stem.count >= 7 && (stem[0] == 78 || stem[0] == 83) && (stem[3] == 69 || stem[3] == 87)
+    var lat = 0.0
+    var lon = 0.0
+    if ok {
+        let latText = stem.slice(from: 1, to: 3).text ?? ""
+        let lonText = stem.slice(from: 4, to: 7).text ?? ""
+        if let a = Int(latText) {
+            lat = if stem[0] == 83 { -Float(a) } else { Float(a) }
+        } else {
+            ok = false
+        }
+        if let o = Int(lonText) {
+            lon = if stem[3] == 87 { -Float(o) } else { Float(o) }
+        } else {
+            ok = false
+        }
+    }
+    if !ok {
+        return .failure(error: Error("{name}: the name of an .hgt file must say where it is, like N14E121.hgt"))
+    }
+    let side = Int(sqrt(Float(d.count / 2)) + 0.5)
+    if side < 2 || side * side * 2 != d.count {
+        return .failure(error: Error("{name} isn't an SRTM file: it has {d.count} bytes, not 1201 × 1201 or 3601 × 3601 numbers of two bytes"))
+    }
+    let none = 0.0 / 0.0
+    var values: [Float] = []
+    var lo = 1.0 / 0.0
+    var hi = -1.0 / 0.0
+    let total = side * side
+    var i = 0
+    while i < total {
+        let v = d.int16(at: i * 2, bigEndian: true)
+        if v == -32768 {
+            values.append(none)
+        } else {
+            let x = Float(v)
+            values.append(x)
+            if x < lo { lo = x }
+            if x > hi { hi = x }
+        }
+        i += 1
+    }
+    // The cells' centers are on the whole degrees, so the edges are half a
+    // cell outside them.
+    let cell = 1.0 / Float(side - 1)
+    let box = boxOf(minX: lon - cell / 2.0, minY: lat - cell / 2.0, maxX: lon + 1.0 + cell / 2.0, maxY: lat + 1.0 + cell / 2.0)
+    var layer = Layer(name: rasStem(path), kind: .raster, source: path, crs: geodesy.wgs84Crs())
+    layer.raster = Raster(width: side, height: side, bands: [values], box: box, noData: -32768.0,
+                          lows: [if lo <= hi { lo } else { none }], highs: [if lo <= hi { hi } else { none }])
+    Result.ok(value: RasterFile(layer: layer))
+}
+
+// ----- pictures with a world file -----
+
+// A PNG or JPEG with a world file: its colors as three bands.
+fn rasReadPicture(_ path: String) -> Result<RasterFile> {
+    let name = path.fileName
+    if !fileExists(path) {
+        return .failure(error: Error("can't read {name}: there's no such file"))
+    }
+    let world = rasWorldFile(path)
+    if world.error != "" {
+        return .failure(error: Error("{name} {world.error}"))
+    }
+    if world.flipped {
+        return .failure(error: Error("{name} has a world file that turns it upside down, which cartography can't show yet"))
+    }
+    if !world.found {
+        let ext = path.fileExtension.lowercase()
+        let wanted = if ext == "png" { ".pgw" } else { ".jgw" }
+        return .failure(error: Error("{name} has no world file ({wanted}) beside it, so cartography can't tell where it is on the map"))
+    }
+    if let picture = readImage(path) {
+        let (w, h, pixels) = picture
+        if w <= 0 || h <= 0 || pixels.count < w * h {
+            return .failure(error: Error("{name} isn't a picture cartography can read"))
+        }
+        var notes: [String] = []
+        var crs = geodesy.wgs84Crs()
+        if let found = rasSidecarCrs(path) {
+            crs = found
+        } else {
+            notes.append("{name} has no .prj file beside it: taken to be WGS 84")
+        }
+        let top = world.firstY + world.cellY / 2.0
+        let box = boxOf(minX: world.left, minY: top - Float(h) * world.cellY,
+                        maxX: world.left + Float(w) * world.cellX, maxY: top)
+        var red: [Float] = []
+        var green: [Float] = []
+        var blue: [Float] = []
+        let none = 0.0 / 0.0
+        for k in 0..(w * h) {
+            let p = pixels[k]
+            if p % 256 == 0 {
+                red.append(none)
+                green.append(none)
+                blue.append(none)
+            } else {
+                red.append(Float(p / 16777216 % 256))
+                green.append(Float(p / 65536 % 256))
+                blue.append(Float(p / 256 % 256))
+            }
+        }
+        var layer = Layer(name: rasStem(path), kind: .raster, source: path, crs: crs)
+        layer.raster = makeRaster(width: w, height: h, bands: [red, green, blue], box: box)
+        return Result.ok(value: RasterFile(layer: layer, notes: notes))
+    }
+    Result.failure(error: Error("{name} isn't a picture cartography can read"))
 }

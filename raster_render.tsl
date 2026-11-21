@@ -1,0 +1,540 @@
+// cartography: rasters, drawing. `renderRaster` turns a raster layer's
+// cells into pixels in the map's CRS, colored as its `rasterStyle` says,
+// and warped when the layer is in another CRS. Ported from Meridian's
+// raster/render.tsl.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+// A pixel for `writeImage`: red, green, blue and opacity from 0 to 255.
+fn rasPixel(_ r: Int, _ g: Int, _ b: Int) -> Int {
+    r * 16777216 + g * 65536 + b * 256 + 255
+}
+
+// The values at `low` and `high` percent of a band's values in order
+// (2 and 98: without the few extreme ones), from at most about 100 000
+// of its cells. NaN, NaN for a band without values.
+fn rasPercentiles(_ band: [Float], low: Float, high: Float) -> (Float, Float) {
+    let n = band.count
+    let stride = max(1, (n + 99_999) / 100_000)
+    var some: [Float] = []
+    var i = 0
+    while i < n {
+        let v = band[i]
+        if v.isFinite {
+            some.append(v)
+        }
+        i += stride
+    }
+    if some.isEmpty {
+        return (0.0 / 0.0, 0.0 / 0.0)
+    }
+    let ordered = some.sorted()
+    let last = Float(ordered.count - 1)
+    let a = Int(low / 100.0 * last + 0.5).clamped(min: 0, max: ordered.count - 1)
+    let b = Int(high / 100.0 * last + 0.5).clamped(min: 0, max: ordered.count - 1)
+    (ordered[a], ordered[b])
+}
+
+// Whether bands hold what a picture's do: whole numbers from 0 to 255.
+fn rasIsByteData(_ r: Raster, _ bands: [Int]) -> Bool {
+    var top = 0.0
+    for b in bands {
+        if b < 0 || b >= r.bands.count {
+            return false
+        }
+        let (lo, hi) = rasBandRange(r, b)
+        if lo.isNaN {
+            continue
+        }
+        if lo < 0.0 || hi > 255.0 {
+            return false
+        }
+        top = max(top, hi)
+        let n = r.bands[b].count
+        let stride = max(1, n / 500)
+        var i = 0
+        while i < n {
+            let v = r.bands[b][i]
+            if v.isFinite && v != floor(v) {
+                return false
+            }
+            i += stride
+        }
+    }
+    top > 1.0
+}
+
+/// The style a raster layer starts with: a color picture for three or four
+/// bands of 0 to 255, otherwise the first band in gray, from its 2nd to
+/// its 98th percentile.
+public fn defaultRasterStyle(_ layer: Layer) -> RasterStyle {
+    let r = layer.raster
+    if r.bands.isEmpty {
+        return RasterStyle()
+    }
+    if (r.bands.count == 3 || r.bands.count == 4) && rasIsByteData(r, [0, 1, 2]) {
+        return RasterStyle(look: .rgb, band: 0, redBand: 0, greenBand: 1, blueBand: 2, low: 0.0, high: 255.0)
+    }
+    var (lo, hi) = rasPercentiles(r.bands[0], low: 2.0, high: 98.0)
+    if !(hi > lo) {
+        let (least, most) = rasBandRange(r, 0)
+        lo = least
+        hi = most
+    }
+    if lo.isNaN || hi.isNaN {
+        lo = 0.0
+        hi = 1.0
+    }
+    RasterStyle(look: .gray, band: 0, low: lo, high: hi)
+}
+
+/// A raster style with the colors of a ramp from the band's smallest value
+/// to its largest (`ramp`: one of `rampNames()`).
+public fn rampRasterStyle(_ layer: Layer, ramp: String = "Terrain", band: Int = 0) -> RasterStyle {
+    let (lo, hi) = rasBandRange(layer.raster, band)
+    var s = layer.rasterStyle
+    s.look = .ramp
+    s.ramp = ramp
+    s.band = band
+    s.low = if lo.isFinite { lo } else { 0.0 }
+    s.high = if hi.isFinite { hi } else { 1.0 }
+    s
+}
+
+// A band made smaller: `outW` × `outH` cells, each the mean of the cells
+// it covers (NaN if none of them has a value).
+fn rasAveraged(_ band: [Float], width: Int, height: Int, outW: Int, outH: Int) -> [Float] {
+    var out: [Float] = []
+    let none = 0.0 / 0.0
+    var starts: [Int] = []
+    for ox in 0..(outW + 1) {
+        starts.append(ox * width / outW)
+    }
+    for oy in 0..outH {
+        let y0 = oy * height / outH
+        let y1 = max(y0 + 1, (oy + 1) * height / outH)
+        for ox in 0..outW {
+            let x0 = starts[ox]
+            let x1 = max(x0 + 1, starts[ox + 1])
+            var sum = 0.0
+            var count = 0
+            var y = y0
+            while y < y1 {
+                var i = y * width + x0
+                let end = y * width + x1
+                while i < end {
+                    let v = band[i]
+                    if !v.isNaN {
+                        sum += v
+                        count += 1
+                    }
+                    i += 1
+                }
+                y += 1
+            }
+            out.append(if count > 0 { sum / Float(count) } else { none })
+        }
+    }
+    out
+}
+
+/// A box of one CRS as the box around it in another (its edges bend, so
+/// points along and inside them are taken too).
+public fn boxInCrs(_ box: Box, from: geodesy.Crs, to: geodesy.Crs) -> Box {
+    if sameCrs(from, to) || box.empty {
+        return box
+    }
+    let n = 32
+    let side = n + 1
+    var coords: [Float] = []
+    for j in 0..side {
+        for i in 0..side {
+            coords.append(box.minX + box.width() * Float(i) / Float(n))
+            coords.append(box.minY + box.height() * Float(j) / Float(n))
+        }
+    }
+    let moved = transformCoords(from: from, to: to, coords: coords)
+    var out = Box()
+    var k = 0
+    while k + 1 < moved.count {
+        out.add(moved[k], moved[k + 1])
+        k += 2
+    }
+    // Where the other CRS tears the box apart (a world map's left and right
+    // edges are the same meridian), two neighbouring points land far from
+    // each other, and the places next to the tear are the farthest of all.
+    // They are looked for between such neighbours, by halving.
+    var pairs: [Int] = []
+    var total = 0.0
+    var counted = 0
+    for j in 0..side {
+        for i in 0..side {
+            let a = j * side + i
+            for b in [a + 1, a + side] {
+                if (b == a + 1 && i == n) || (b == a + side && j == n) {
+                    continue
+                }
+                let d = abs(moved[2 * a] - moved[2 * b]) + abs(moved[2 * a + 1] - moved[2 * b + 1])
+                if d.isFinite {
+                    pairs.append(a)
+                    pairs.append(b)
+                    total += d
+                    counted += 1
+                }
+            }
+        }
+    }
+    if counted == 0 {
+        return out
+    }
+    let usual = total / Float(counted)
+    k = 0
+    while k + 1 < pairs.count {
+        let a = pairs[k]
+        let b = pairs[k + 1]
+        k += 2
+        if abs(moved[2 * a] - moved[2 * b]) + abs(moved[2 * a + 1] - moved[2 * b + 1]) <= 8.0 * usual {
+            continue
+        }
+        var (ax, ay, bx, by) = (coords[2 * a], coords[2 * a + 1], coords[2 * b], coords[2 * b + 1])
+        var (pax, pay, pbx, pby) = (moved[2 * a], moved[2 * a + 1], moved[2 * b], moved[2 * b + 1])
+        for _ in 0..40 {
+            let mx = (ax + bx) / 2.0
+            let my = (ay + by) / 2.0
+            let (px, py) = geodesy.transform(mx, my, from: from, to: to)
+            if !px.isFinite || !py.isFinite {
+                break
+            }
+            out.add(px, py)
+            // Keep the half that still has the jump in it.
+            if abs(pax - px) + abs(pay - py) > abs(pbx - px) + abs(pby - py) {
+                bx = mx
+                by = my
+                pbx = px
+                pby = py
+            } else {
+                ax = mx
+                ay = my
+                pax = px
+                pay = py
+            }
+        }
+    }
+    out
+}
+
+// The color a part of the way (0 to 1) along a list of colors.
+fn rasBlend(_ colors: [Rgba], _ t: Float) -> Rgba {
+    let at = t.clamped(min: 0.0, max: 1.0) * Float(colors.count - 1)
+    let i = min(Int(at), colors.count - 2)
+    let f = at - Float(i)
+    let (a, b) = (colors[i], colors[i + 1])
+    Rgba(r: Int(Float(a.r) + Float(b.r - a.r) * f + 0.5), g: Int(Float(a.g) + Float(b.g - a.g) * f + 0.5), b: Int(Float(a.b) + Float(b.b - a.b) * f + 0.5))
+}
+
+/// The 256 colors (pixels, see `writeImage`) a style gives values from its
+/// `low` (the first) to its `high` (the last): along the gray scale, the
+/// ramp or the custom colors, bent by the gamma, cut into `classes` steps
+/// and turned around as the style says. Legends can draw them.
+public fn rasterColors(_ style: RasterStyle) -> [Int] {
+    var colors: [Int] = []
+    let shaded = style.look == .hillshade
+    for k in 0..256 {
+        var t = Float(k) / 255.0
+        if !shaded {
+            if style.gamma > 0.0 && style.gamma != 1.0 {
+                t = pow(t, 1.0 / style.gamma)
+            }
+            if style.classes >= 2 {
+                let step = min(Int(t * Float(style.classes)), style.classes - 1)
+                t = Float(step) / Float(style.classes - 1)
+            }
+            if style.invert {
+                t = 1.0 - t
+            }
+        }
+        if style.look == .ramp {
+            let c = if style.colors.count >= 2 { rasBlend(style.colors, t) } else if style.colors.count == 1 { style.colors[0] } else { rampColor(style.ramp, t) }
+            colors.append(rasPixel(c.r, c.g, c.b))
+        } else {
+            let v = Int(t * 255.0 + 0.5)
+            colors.append(rasPixel(v, v, v))
+        }
+    }
+    colors
+}
+
+/// The layer's raster with its pixels made for a map in `crs`: `pixels`,
+/// `pixelWidth`, `pixelHeight` and `pixelBox` (in `crs`), colored by
+/// `layer.rasterStyle`, and warped into `crs` if the layer is in another
+/// CRS. The picture is at most 2048 pixels on its longer side (a bigger
+/// raster is averaged down).
+///
+/// - `.gray`: band `band` from black at `low` to white at `high`;
+/// - `.ramp`: the same value along the ramp `ramp` (or `colors`);
+/// - `.hillshade`: the band as shaded relief, with the style's sun;
+/// - `.rgb`: three bands as red, green and blue: from 0 to 255 when they
+///   hold a picture's whole numbers, otherwise each from its own 2nd to
+///   98th percentile.
+/// Cells without a value are see-through.
+public fn renderRaster(_ layer: Layer, _ crs: geodesy.Crs) -> Raster {
+    rasRender(layer, crs, maxSize: 2048)
+}
+
+// renderRaster with another largest size.
+fn rasRender(_ layer: Layer, _ to: geodesy.Crs, maxSize: Int) -> Raster {
+    var out = layer.raster
+    let r = layer.raster
+    let style = layer.rasterStyle
+    out.pixels = []
+    out.pixelWidth = 0
+    out.pixelHeight = 0
+    out.pixelBox = Box()
+    if r.bands.isEmpty || r.width <= 0 || r.height <= 0 || r.box.empty {
+        return out
+    }
+    let most = max(16, maxSize)
+    let last = r.bands.count - 1
+
+    // The bands that are drawn, made smaller if the raster is bigger than
+    // the picture may be.
+    var wanted: [Int] = [style.band.clamped(min: 0, max: last)]
+    if style.look == .rgb {
+        wanted = [style.redBand.clamped(min: 0, max: last), style.greenBand.clamped(min: 0, max: last),
+                  style.blueBand.clamped(min: 0, max: last)]
+    }
+    var w = r.width
+    var h = r.height
+    let longer = max(w, h)
+    if longer > most {
+        w = max(1, (r.width * most + longer / 2) / longer)
+        h = max(1, (r.height * most + longer / 2) / longer)
+    }
+    var planes: [[Float]] = []
+    for b in wanted {
+        if r.bands[b].count < r.width * r.height {
+            return out
+        }
+        if w != r.width || h != r.height {
+            planes.append(rasAveraged(r.bands[b], width: r.width, height: r.height, outW: w, outH: h))
+        } else {
+            planes.append(r.bands[b])
+        }
+    }
+
+    // A color for every cell.
+    var pixels: [Int] = []
+    let n = w * h
+    if style.look == .rgb {
+        var lows: [Float] = [0.0, 0.0, 0.0]
+        var scales: [Float] = [1.0, 1.0, 1.0]
+        if !rasIsByteData(r, wanted) {
+            for k in 0..3 {
+                var (lo, hi) = rasPercentiles(r.bands[wanted[k]], low: 2.0, high: 98.0)
+                if !(hi > lo) {
+                    let (least, greatest) = rasBandRange(r, wanted[k])
+                    lo = least
+                    hi = greatest
+                }
+                lows[k] = lo
+                scales[k] = if hi > lo { 255.0 / (hi - lo) } else { 0.0 }
+            }
+        }
+        let (lo0, lo1, lo2) = (lows[0], lows[1], lows[2])
+        let (s0, s1, s2) = (scales[0], scales[1], scales[2])
+        var i = 0
+        while i < n {
+            let red = (planes[0][i] - lo0) * s0
+            let green = (planes[1][i] - lo1) * s1
+            let blue = (planes[2][i] - lo2) * s2
+            if (red + green + blue).isNaN {
+                pixels.append(0)
+            } else {
+                pixels.append(Int(red.clamped(min: 0.0, max: 255.0) + 0.5) * 16777216 +
+                              Int(green.clamped(min: 0.0, max: 255.0) + 0.5) * 65536 +
+                              Int(blue.clamped(min: 0.0, max: 255.0) + 0.5) * 256 + 255)
+            }
+            i += 1
+        }
+    } else {
+        var values = planes[0]
+        var lo = style.low
+        var hi = style.high
+        if style.look == .hillshade {
+            let small = Raster(width: w, height: h, bands: [values], box: r.box)
+            values = rasTerrain(small, crs: layer.crs, band: 0, what: 0, azimuth: style.azimuth, altitude: style.altitude,
+                                exaggeration: style.exaggeration)
+            lo = 0.0
+            hi = 255.0
+        } else if !(hi > lo) {
+            let (least, greatest) = rasBandRange(r, wanted[0])
+            lo = least
+            hi = greatest
+        }
+        let scale = if hi > lo { 255.0 / (hi - lo) } else { 0.0 }
+        let colors = rasterColors(style)
+        var i = 0
+        while i < n {
+            let t = (values[i] - lo) * scale
+            if t.isNaN {
+                pixels.append(0)
+            } else {
+                pixels.append(colors[Int(t.clamped(min: 0.0, max: 255.0) + 0.5)])
+            }
+            i += 1
+        }
+    }
+    planes = []
+
+    if sameCrs(layer.crs, to) {
+        out.pixels = pixels
+        out.pixelWidth = w
+        out.pixelHeight = h
+        out.pixelBox = r.box
+        return out
+    }
+    let (warped, ww, wh, box) = rasWarp(pixels, w, h, r.box, from: layer.crs, to: to, most: most)
+    out.pixels = warped
+    out.pixelWidth = ww
+    out.pixelHeight = wh
+    out.pixelBox = box
+    out
+}
+
+// Warps pixels (`w` × `h` over `src` in the CRS `from`) into the CRS
+// `to`: a grid of pixels over the box around them there, each taking the
+// color of the source pixel its center falls in. Where that is, is worked
+// out exactly for every 16th pixel (the nodes of a mesh) and, where that
+// can be trusted, by interpolation between them. Gives the pixels, their
+// size and the box they cover.
+fn rasWarp(_ pixels: [Int], _ w: Int, _ h: Int, _ src: Box, from: geodesy.Crs, to: geodesy.Crs, most: Int) -> ([Int], Int, Int, Box) {
+    let box = boxInCrs(src, from: from, to: to)
+    if box.empty || !(box.width() > 0.0) || !(box.height() > 0.0) {
+        return ([], 0, 0, Box())
+    }
+    let side = min(most, max(w, h))
+    var outW = side
+    var outH = side
+    if box.width() >= box.height() {
+        outH = max(1, Int(Float(side) * box.height() / box.width() + 0.5))
+    } else {
+        outW = max(1, Int(Float(side) * box.width() / box.height() + 0.5))
+    }
+    let px = box.width() / Float(outW)
+    let py = box.height() / Float(outH)
+    let mesh = 16
+    let nodesX = (outW + mesh - 1) / mesh + 1
+    let nodesY = (outH + mesh - 1) / mesh + 1
+    var nodes: [Float] = []
+    for j in 0..nodesY {
+        for i in 0..nodesX {
+            nodes.append(box.minX + Float(i * mesh) * px)
+            nodes.append(box.maxY - Float(j * mesh) * py)
+        }
+    }
+    // A place of the picture that the CRS `to` can't show (outside the
+    // outline of a world map, say) comes back as some other place: taking
+    // the nodes there and back again shows which they are.
+    let there = transformCoords(from: to, to: from, coords: nodes)
+    let back = transformCoords(from: from, to: to, coords: there)
+    // From coordinates to columns and rows of the source pixels.
+    let perX = Float(w) / src.width()
+    let perY = Float(h) / src.height()
+    let none = 0.0 / 0.0
+    var k = 0
+    while k + 1 < nodes.count {
+        if abs(back[k] - nodes[k]) < px && abs(back[k + 1] - nodes[k + 1]) < py {
+            nodes[k] = (there[k] - src.minX) * perX
+            nodes[k + 1] = (src.maxY - there[k + 1]) * perY
+        } else {
+            nodes[k] = none
+            nodes[k + 1] = none
+        }
+        k += 2
+    }
+    // Between four nodes the columns and rows are interpolated, which is
+    // only right where they change evenly. So for each square of the mesh
+    // its middle is worked out exactly too: if that isn't where the
+    // interpolation puts it (the source CRS jumps there, as longitudes do
+    // from 180° to -180°; or the projection bends sharply), or a corner
+    // can't be shown, every pixel of the square is worked out by itself.
+    var middles: [Float] = []
+    for j in 0..(nodesY - 1) {
+        for i in 0..(nodesX - 1) {
+            middles.append(box.minX + (Float(i * mesh) + Float(mesh) / 2.0) * px)
+            middles.append(box.maxY - (Float(j * mesh) + Float(mesh) / 2.0) * py)
+        }
+    }
+    middles = transformCoords(from: to, to: from, coords: middles)
+    var even: [Bool] = []
+    for j in 0..(nodesY - 1) {
+        for i in 0..(nodesX - 1) {
+            let a = 2 * (j * nodesX + i)
+            let b = a + 2 * nodesX
+            let m = 2 * (j * (nodesX - 1) + i)
+            let u = (nodes[a] + nodes[a + 2] + nodes[b] + nodes[b + 2]) / 4.0
+            let v = (nodes[a + 1] + nodes[a + 3] + nodes[b + 1] + nodes[b + 3]) / 4.0
+            let du = u - (middles[m] - src.minX) * perX
+            let dv = v - (src.maxY - middles[m + 1]) * perY
+            // NaN (a corner or the middle can't be shown) fails the test too.
+            even.append(abs(du) < 0.5 && abs(dv) < 0.5)
+        }
+    }
+    middles = []
+    var warped: [Int] = []
+    let fw = Float(w)
+    let fh = Float(h)
+    let size = Float(mesh)
+    for oy in 0..outH {
+        let j = oy / mesh
+        let fy = (Float(oy - j * mesh) + 0.5) / size
+        for i in 0..(nodesX - 1) {
+            let first = i * mesh
+            if first >= outW {
+                break
+            }
+            let count = min(mesh, outW - first)
+            let a = 2 * (j * nodesX + i)
+            let b = a + 2 * nodesX
+            if even[j * (nodesX - 1) + i] {
+                // Columns and rows at the left and right ends of this stretch.
+                let leftU = nodes[a] + (nodes[b] - nodes[a]) * fy
+                let leftV = nodes[a + 1] + (nodes[b + 1] - nodes[a + 1]) * fy
+                let rightU = nodes[a + 2] + (nodes[b + 2] - nodes[a + 2]) * fy
+                let rightV = nodes[a + 3] + (nodes[b + 3] - nodes[a + 3]) * fy
+                let du = (rightU - leftU) / size
+                let dv = (rightV - leftV) / size
+                var u = leftU + du * 0.5
+                var v = leftV + dv * 0.5
+                for _ in 0..count {
+                    if u >= 0.0 && v >= 0.0 && u < fw && v < fh {
+                        warped.append(pixels[Int(v) * w + Int(u)])
+                    } else {
+                        warped.append(0)
+                    }
+                    u += du
+                    v += dv
+                }
+            } else {
+                // Every pixel by itself, there and back again.
+                for c in 0..count {
+                    let x = box.minX + (Float(first + c) + 0.5) * px
+                    let y = box.maxY - (Float(oy) + 0.5) * py
+                    let (sx, sy) = geodesy.transform(x, y, from: to, to: from)
+                    let (bx, by) = geodesy.transform(sx, sy, from: from, to: to)
+                    let u = (sx - src.minX) * perX
+                    let v = (src.maxY - sy) * perY
+                    if abs(bx - x) < px && abs(by - y) < py && u >= 0.0 && v >= 0.0 && u < fw && v < fh {
+                        warped.append(pixels[Int(v) * w + Int(u)])
+                    } else {
+                        warped.append(0)
+                    }
+                }
+            }
+        }
+    }
+    (warped, outW, outH, box)
+}

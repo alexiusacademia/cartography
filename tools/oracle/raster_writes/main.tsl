@@ -1,0 +1,39 @@
+// Writes rasters with cartography's writers into a folder, for
+// tools/oracle/raster_check_writes.py to read with GDAL: every packing and
+// type of GeoTIFF, an ASCII grid, and a GeoTIFF of a CRS without an EPSG
+// code. Run from the library's folder:
+//
+//   tessel run tools/oracle/raster_writes <folder>
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../../.."
+
+fn main() {
+    let args = arguments()
+    if args.isEmpty {
+        print("usage: raster_writes <folder>")
+        exit(1)
+    }
+    let folder = args[0]
+    let _made = createFolder(path: folder)
+    let data = "tests/data/raster"
+    let dem = try cartography.readRaster(joinPath(data, "dem_holes.tif"))
+    let rgb = try cartography.readRaster(joinPath(data, "rgb_pixel_lzw.tif"))
+    let i16 = try cartography.readRaster(joinPath(data, "i16_nodata.tif"))
+    let lcc = try cartography.readRaster(joinPath(data, "crs_custom_lcc.tif"))
+    let ll = try cartography.readRaster(joinPath(data, "dem_4326.tif"))
+    for how in ["deflate", "lzw", "none"] {
+        let _a = try cartography.writeGeoTIFF(dem, joinPath(folder, "dem_float32_{how}.tif"), compression: how)
+        let _b = try cartography.writeGeoTIFF(dem, joinPath(folder, "dem_float64_{how}.tif"), compression: how, type: "float64")
+        let _c = try cartography.writeGeoTIFF(rgb, joinPath(folder, "rgb_uint8_{how}.tif"), compression: how, type: "uint8")
+    }
+    for type in ["int16", "uint16", "int32", "uint32"] {
+        let _d = try cartography.writeGeoTIFF(i16, joinPath(folder, "i16_{type}.tif"), compression: "lzw", type: type)
+    }
+    let _e = try cartography.writeGeoTIFF(lcc, joinPath(folder, "lcc.tif"))
+    let _f = try cartography.writeGeoTIFF(ll, joinPath(folder, "lonlat.tif"))
+    let _g = try cartography.writeAsciiGrid(dem, joinPath(folder, "dem.asc"))
+    print("written to {folder}")
+}

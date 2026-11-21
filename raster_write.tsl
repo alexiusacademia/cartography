@@ -1,0 +1,335 @@
+// cartography: rasters, writing GeoTIFF and ESRI ASCII grids. Ported from
+// Meridian's raster/write.tsl, with more kinds of numbers.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+// A number as text, as short as it can be: 30 rather than 30.0.
+fn rasNumberText(_ x: Float) -> String {
+    if x.isNaN {
+        return "nan"
+    }
+    if x == floor(x) && abs(x) < 1000000000000000.0 {
+        return "{Int(x)}"
+    }
+    "{x}"
+}
+
+// One tag of a TIFF being written: its number, the type of its values
+// (2: text, 3: 16-bit, 4: 32-bit, 12: 64-bit decimal), how many there
+// are, and their bytes.
+struct RasTag {
+    tag: Int = 0
+    kind: Int = 3
+    count: Int = 1
+    bytes: [Int] = []
+}
+
+fn rasShorts(_ tag: Int, _ values: [Int]) -> RasTag {
+    var bytes: [Int] = []
+    for v in values {
+        bytes += v.bytes(count: 2)
+    }
+    RasTag(tag: tag, kind: 3, count: values.count, bytes: bytes)
+}
+
+fn rasLongs(_ tag: Int, _ values: [Int]) -> RasTag {
+    var bytes: [Int] = []
+    for v in values {
+        bytes += v.bytes(count: 4)
+    }
+    RasTag(tag: tag, kind: 4, count: values.count, bytes: bytes)
+}
+
+fn rasDoubles(_ tag: Int, _ values: [Float]) -> RasTag {
+    var bytes: [Int] = []
+    for v in values {
+        bytes += v.bytes()
+    }
+    RasTag(tag: tag, kind: 12, count: values.count, bytes: bytes)
+}
+
+// Text, with the zero byte that ends it.
+fn rasAscii(_ tag: Int, _ text: String) -> RasTag {
+    var bytes = Data(text: text).bytes
+    bytes.append(0)
+    RasTag(tag: tag, kind: 2, count: bytes.count, bytes: bytes)
+}
+
+// What a cell type is written as: bits, TIFF sample format (1: unsigned,
+// 2: signed, 3: decimal), and the no-data value to use when the raster
+// has none. Bits 0: a type unknown here.
+fn rasCellType(_ type: String) -> (Int, Int, Float) {
+    match type.lowercase() {
+        "float32" -> (32, 3, 0.0 / 0.0)
+        "float64" -> (64, 3, 0.0 / 0.0)
+        "uint8" -> (8, 1, 255.0)
+        "byte" -> (8, 1, 255.0)
+        "int16" -> (16, 2, -32768.0)
+        "uint16" -> (16, 1, 65535.0)
+        "int32" -> (32, 2, -2147483648.0)
+        "uint32" -> (32, 1, 4294967295.0)
+        _ -> (0, 0, 0.0)
+    }
+}
+
+/// Writes a raster layer as a GeoTIFF file: every band, in strips, with
+/// the tags that say where it is (pixel scale and tie point), its no-data
+/// value (GDAL_NODATA) and the GeoTIFF keys with the CRS's EPSG code (a CRS
+/// without one is written beside it as WKT, in a `.prj` and a `.aux.xml`).
+///
+/// - `compression`: "deflate" (the default), "lzw" or "none".
+/// - `type`: how the values are stored: "float32" (the default),
+///   "float64", "uint8", "int16", "uint16", "int32" or "uint32". Whole
+///   number types round the values and clamp them to their range.
+///
+/// Cells without a value get the raster's `noData` value; with none, NaN
+/// for decimal types and the type's extreme value (255, -32768, …) for
+/// whole numbers. A raster without a `noData` value and without empty
+/// cells is written without one.
+public fn writeGeoTIFF(_ layer: Layer, _ path: String, compression: String = "deflate", type: String = "float32") -> Result<Bool> {
+    let r = layer.raster
+    let w = r.width
+    let h = r.height
+    let bands = r.bands.count
+    if bands == 0 || w <= 0 || h <= 0 {
+        return .failure(error: Error("layer \"{layer.name}\" has no values to write"))
+    }
+    for b in r.bands {
+        if b.count < w * h {
+            return .failure(error: Error("layer \"{layer.name}\" doesn't hold all of its cells"))
+        }
+    }
+    let how = compression.lowercase()
+    if how != "deflate" && how != "lzw" && how != "none" {
+        return .failure(error: Error("\"{compression}\" isn't a compression cartography can write: use deflate, lzw or none"))
+    }
+    let (bits, format, typeNoData) = rasCellType(type)
+    if bits == 0 {
+        return .failure(error: Error("\"{type}\" isn't a type of cell cartography can write: use float32, float64, uint8, int16, uint16, int32 or uint32"))
+    }
+    let size = bits / 8
+    if w * h * bands * size > 4_000_000_000 {
+        return .failure(error: Error("layer \"{layer.name}\" is too big for a TIFF file"))
+    }
+    // The no-data value: the raster's, else (if some cells have no value)
+    // the type's; none at all for a whole raster without one.
+    var holes = false
+    for b in r.bands {
+        for v in b {
+            if v.isNaN {
+                holes = true
+                break
+            }
+        }
+    }
+    // The range of a whole number type.
+    var least = 0.0
+    var most = 0.0
+    if format != 3 {
+        let span = pow(2.0, Float(bits))
+        least = if format == 2 { -span / 2.0 } else { 0.0 }
+        most = if format == 2 { span / 2.0 - 1.0 } else { span - 1.0 }
+    }
+    var noData = if r.noData.isNaN { typeNoData } else { r.noData }
+    if format != 3 && (noData < least || noData > most || noData != floor(noData)) {
+        // The raster's no-data value doesn't fit the type.
+        noData = typeNoData
+    }
+    let tagNoData = !r.noData.isNaN || holes
+
+    // The strips: about a quarter of a megabyte of rows each.
+    let rowsPerStrip = min(h, max(1, 262_144 / (w * bands * size)))
+    var strips: [Data] = []
+    var row = 0
+    while row < h {
+        let end = min(h, row + rowsPerStrip)
+        let start = row * w
+        let stop = end * w
+        var plain = Data()
+        if format == 3 {
+            var values: [Float] = []
+            for i in start..stop {
+                for b in 0..bands {
+                    let v = r.bands[b][i]
+                    values.append(if v.isNaN { noData } else { v })
+                }
+            }
+            plain = if bits == 32 { Data(float32s: values) } else { Data(float64s: values) }
+        } else {
+            for i in start..stop {
+                for b in 0..bands {
+                    let v = r.bands[b][i]
+                    let x = if v.isNaN { noData } else { round(v).clamped(min: least, max: most) }
+                    let n = Int(x)
+                    var k = 0
+                    while k < size {
+                        plain.append(byte: (n >> (8 * k)) & 255)
+                        k += 1
+                    }
+                }
+            }
+        }
+        if how == "deflate" {
+            strips.append(plain.compressed("zlib"))
+        } else if how == "lzw" {
+            strips.append(Data(bytes: rasLzwEncode(plain.bytes)))
+        } else {
+            strips.append(plain)
+        }
+        row = end
+    }
+
+    // The GeoTIFF keys: what kind of CRS, that a cell is an area, a name,
+    // and the EPSG code.
+    let crs = layer.crs
+    let geographic = crs.isGeographic()
+    let code = if crs.code > 0 && crs.code < 65536 { crs.code } else { 32767 }
+    let citation = crs.name + "|"
+    var keys: [Int] = [1, 1, 0, 4,
+                       1024, 0, 1, if geographic { 2 } else { 1 },
+                       1025, 0, 1, 1,
+                       1026, 34737, Data(text: citation).count, 0]
+    if geographic {
+        keys += [2048, 0, 1, code]
+    } else {
+        keys += [3072, 0, 1, code]
+    }
+
+    var bitList: [Int] = []
+    var formats: [Int] = []
+    var extras: [Int] = []
+    for b in 0..bands {
+        bitList.append(bits)
+        formats.append(format)
+        if b > 0 {
+            extras.append(0)
+        }
+    }
+    var counts: [Int] = []
+    for s in strips {
+        counts.append(s.count)
+    }
+    let cellX = r.box.width() / Float(w)
+    let cellY = r.box.height() / Float(h)
+    var tags: [RasTag] = [
+        rasLongs(256, [w]),
+        rasLongs(257, [h]),
+        rasShorts(258, bitList),
+        rasShorts(259, [if how == "deflate" { 8 } else if how == "lzw" { 5 } else { 1 }]),
+        rasShorts(262, [1]),
+        rasLongs(273, counts),
+        rasShorts(277, [bands]),
+        rasLongs(278, [rowsPerStrip]),
+        rasLongs(279, counts),
+        rasShorts(284, [1]),
+    ]
+    if bands > 1 {
+        tags.append(rasShorts(338, extras))
+    }
+    tags.append(rasShorts(339, formats))
+    tags.append(rasDoubles(33550, [cellX, cellY, 0.0]))
+    tags.append(rasDoubles(33922, [0.0, 0.0, 0.0, r.box.minX, r.box.maxY, 0.0]))
+    tags.append(rasShorts(34735, keys))
+    tags.append(rasAscii(34737, citation))
+    if tagNoData {
+        tags.append(rasAscii(42113, rasNumberText(noData)))
+    }
+
+    // The file: 8 bytes, the list of tags, the values that don't fit in
+    // it, then the strips.
+    let listSize = 2 + 12 * tags.count + 4
+    var extraAt: [Int] = []
+    var at = 8 + listSize
+    for t in tags {
+        extraAt.append(at)
+        if t.bytes.count > 4 {
+            at += t.bytes.count + t.bytes.count % 2
+        }
+    }
+    var offsets: [Int] = []
+    for c in counts {
+        offsets.append(at)
+        at += c
+    }
+    tags[5] = rasLongs(273, offsets)
+
+    var head: [Int] = [73, 73, 42, 0, 8, 0, 0, 0]
+    head += tags.count.bytes(count: 2)
+    var extra: [Int] = []
+    for (i, t) in tags.enumerated() {
+        head += t.tag.bytes(count: 2)
+        head += t.kind.bytes(count: 2)
+        head += t.count.bytes(count: 4)
+        if t.bytes.count > 4 {
+            head += extraAt[i].bytes(count: 4)
+            extra += t.bytes
+            if t.bytes.count % 2 == 1 {
+                extra.append(0)
+            }
+        } else {
+            head += t.bytes
+            for _ in t.bytes.count..4 {
+                head.append(0)
+            }
+        }
+    }
+    head += [0, 0, 0, 0]
+    head += extra
+    var file = Data(bytes: head)
+    for s in strips {
+        file.append(s)
+    }
+    strips = []
+    try writeBytes(path: path, data: file)
+    if code == 32767 {
+        // No EPSG code: the CRS as WKT beside the file, in a .prj and in
+        // the .aux.xml GDAL reads.
+        let wkt = crs.wkt()
+        try writeText(path: rasSibling(path, "prj"), text: wkt)
+        let escaped = wkt.replace("&", with: "&amp;").replace("<", with: "&lt;").replace(">", with: "&gt;")
+        try writeText(path: path + ".aux.xml", text: "<PAMDataset>\n  <SRS dataAxisToSRSAxisMapping=\"1,2\">{escaped}</SRS>\n</PAMDataset>\n")
+    }
+    Result.ok(value: true)
+}
+
+/// Writes band `band` of a raster layer as an ESRI ASCII grid (`.asc`),
+/// with the CRS beside it as a `.prj` file. Cells without a value get the
+/// raster's `noData` value, or -9999 if it has none.
+public fn writeAsciiGrid(_ layer: Layer, _ path: String, band: Int = 0) -> Result<Bool> {
+    let r = layer.raster
+    let w = r.width
+    let h = r.height
+    if band < 0 || band >= r.bands.count || w <= 0 || h <= 0 || r.bands[band].count < w * h {
+        return .failure(error: Error("layer \"{layer.name}\" has no values to write"))
+    }
+    let cellX = r.box.width() / Float(w)
+    let cellY = r.box.height() / Float(h)
+    let noData = if r.noData.isNaN { -9999.0 } else { r.noData }
+    var lines: [String] = ["ncols {w}", "nrows {h}", "xllcorner {rasNumberText(r.box.minX)}", "yllcorner {rasNumberText(r.box.minY)}"]
+    if abs(cellX - cellY) <= 0.000000001 * cellX {
+        lines.append("cellsize {rasNumberText(cellX)}")
+    } else {
+        lines.append("dx {rasNumberText(cellX)}")
+        lines.append("dy {rasNumberText(cellY)}")
+    }
+    lines.append("NODATA_value {rasNumberText(noData)}")
+    let values = r.bands[band]
+    for row in 0..h {
+        var words: [String] = []
+        var i = row * w
+        let end = i + w
+        while i < end {
+            let v = values[i]
+            words.append(rasNumberText(if v.isNaN { noData } else { v }))
+            i += 1
+        }
+        lines.append(words.joined(separator: " "))
+    }
+    lines.append("")
+    try writeText(path: path, text: lines.joined(separator: "\n"))
+    try writeText(path: rasSibling(path, "prj"), text: layer.crs.wkt())
+    Result.ok(value: true)
+}
