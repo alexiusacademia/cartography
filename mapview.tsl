@@ -1,0 +1,116 @@
+// cartography: MapView, a map ready to use in an app. It draws a Map,
+// pans with a drag, zooms with the wheel, a pinch, a double click or
+// Shift and a drag (a box), turns with a right drag if the map's
+// viewport allows it, finds the feature under a click, downloads the
+// basemap tiles it needs, and shows a scale bar, zoom buttons, a north
+// arrow and a legend if asked.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import viewport
+
+/// A map in an app, bound to a `Map` in the app's state:
+///
+///     state m = cartography.Map()
+///     cartography.MapView(map: m) { hit in … }
+///
+/// - `onClick` gets the top feature under a click (nil: none). With
+///   `selects`, the feature is also selected (and others cleared).
+/// - `onMouse` gets the longitude and latitude under the mouse as it moves.
+/// - `keys`: arrows pan, + and − zoom, 0 shows everything. It takes the
+///   window's keys while the map shows, so it's off unless asked.
+public view MapView(map: bind Map, scaleBar: Bool = true, zoomButtons: Bool = true, northArrow: Bool = false,
+                    legend: Bool = false, imperial: Bool = false, selects: Bool = true, keys: Bool = false,
+                    onMouse: fn(Float, Float) = { lon, lat in }, onClick: fn(Hit?) = { hit in }) {
+    state downX = 0.0
+    state downY = 0.0
+    state moved = false
+    state timer = -1
+    state seen = ""
+
+    ZStack(alignment: .topTrailing) {
+        Canvas { g in
+            map.draw(g)
+            viewport.drawZoomBox(g, map.vp)
+            if scaleBar {
+                drawMapScaleBar(g, map, x: 14, y: g.height - 22, imperial: imperial)
+            }
+            if legend {
+                let _size = drawLegend(g, map, x: 10, y: 10)
+            }
+            if northArrow {
+                drawNorthArrow(g, map, x: g.width - 30, y: if zoomButtons { 110.0 } else { 34.0 })
+            }
+        }
+        .onResize { w, h in
+            map.vp.resize(w, h)
+            mapViewUpdate(map: map)
+        }
+        .onPointer { e in
+            if e.kind == .down {
+                downX = e.x
+                downY = e.y
+                moved = false
+            }
+            if e.kind == .drag && (abs(e.x - downX) > 3.0 || abs(e.y - downY) > 3.0) {
+                moved = true
+            }
+            if e.kind == .move {
+                let (lon, lat) = map.toLonLat(e.x, e.y)
+                onMouse(lon, lat)
+            }
+            let clicked = e.kind == .up && e.button == .left && !moved && e.clicks == 1 && !e.shift
+            let _used = map.vp.handle(e)
+            if clicked {
+                let hit = map.featureAt(e.x, e.y)
+                if selects {
+                    map.clearSelection()
+                    if let h = hit {
+                        map.select(layer: h.layer, rows: [h.row])
+                    }
+                }
+                onClick(hit)
+            }
+        }
+        .onKey { key in
+            if keys {
+                let _used = map.vp.handleKey(key)
+            }
+        }
+
+        if zoomButtons {
+            VStack(spacing: 4) {
+                Button("+") { map.vp.zoomIn() }
+                Button("−") { map.vp.zoomOut() }
+                Button("⤢") { map.fitAll() }
+            }
+            .padding(10)
+        }
+    }
+    .onAppear {
+        // Smooth moves need ticks; every tick also sees whether the view
+        // changed, and fetches (or warps) what the new view needs.
+        // (Tessel has no onDisappear, so the timer starts once and runs on.)
+        if timer >= 0 {
+            return
+        }
+        timer = every(seconds: 1.0 / 60.0) {
+            map.vp.tick()
+            let now = mapViewKey(map)
+            if now != seen {
+                seen = now
+                mapViewUpdate(map: map)
+            }
+        }
+    }
+}
+
+// A text that changes whenever what the map shows changes.
+private fn mapViewKey(_ m: Map) -> String {
+    "{m.vp.centerX},{m.vp.centerY},{m.vp.scale},{m.vp.angle},{m.vp.width},{m.vp.height},{m.version},{m.layers.count}"
+}
+
+// What a MapView does after its view changes: nothing yet (tiles hook in here).
+private fn mapViewUpdate(map: Map) {
+}

@@ -1,0 +1,207 @@
+// Tests of cartography's core: geometry, attributes, styles, Map and the
+// things drawn around a map.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import ".."
+
+fn coreNear(_ a: Float, _ b: Float, _ tol: Float) -> Bool {
+    abs(a - b) <= tol
+}
+
+fn coreSquareLayer() -> cartography.Layer {
+    var l = cartography.Layer(name: "Squares", crs: cartography.lonLat(), geomKind: .polygon)
+    l.geoms = [
+        cartography.polygonGeometry([[0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0], [0.25, 0.25, 0.75, 0.25, 0.75, 0.75, 0.25, 0.75]]),
+        cartography.polygonGeometry([[2.0, 0.0, 3.0, 0.0, 3.0, 1.0, 2.0, 1.0]]),
+    ]
+    l.columns = [cartography.textColumn(name: "name", values: ["a", "b"]), cartography.numberColumn(name: "v", values: [1, 5], whole: true)]
+    l
+}
+
+test "rings close, boxes grow, areas have signs" {
+    let g = cartography.polygonGeometry([[0.0, 0.0, 4.0, 0.0, 4.0, 3.0]])
+    expect(g.parts[0].count == 8)
+    expect(g.box.width() == 4.0)
+    expect(g.box.height() == 3.0)
+    expect(cartography.ringArea2(g.parts[0]) == 12.0)
+    let cw = cartography.polygonGeometry([[0.0, 0.0, 4.0, 3.0, 4.0, 0.0]])
+    expect(cartography.ringArea2(cw.parts[0]) == -12.0)
+}
+
+test "points inside polygons, not in their holes" {
+    let l = coreSquareLayer()
+    let g = l.geoms[0]
+    expect(cartography.polygonContains(g, 0.1, 0.1))
+    expect(!cartography.polygonContains(g, 0.5, 0.5))
+    expect(!cartography.polygonContains(g, 1.5, 0.5))
+    expect(cartography.distanceTo(g, 0.1, 0.1) == 0.0)
+    // In the hole: 0.25 from its edge at x = 0.25.
+    expect(coreNear(cartography.distanceTo(g, 0.5, 0.5), 0.25, 0.000000001))
+    expect(coreNear(cartography.distanceTo(cartography.lineGeometry([0.0, 0.0, 10.0, 0.0]), 5.0, 3.0), 3.0, 0.000000001))
+    expect(coreNear(cartography.lineLength([0.0, 0.0, 3.0, 4.0, 3.0, 10.0]), 11.0, 0.000000001))
+}
+
+test "segments cross or touch" {
+    expect(cartography.segmentsCross(0.0, 0.0, 2.0, 2.0, 0.0, 2.0, 2.0, 0.0))
+    expect(cartography.segmentsCross(0.0, 0.0, 2.0, 0.0, 2.0, 0.0, 3.0, 5.0))
+    expect(!cartography.segmentsCross(0.0, 0.0, 1.0, 0.0, 2.0, 1.0, 3.0, 1.0))
+}
+
+test "columns read numbers, codes stay text" {
+    let n = cartography.columnFromTexts(name: "n", values: ["1", "2", ""])
+    expect(n.kind == cartography.FieldKind.int)
+    expect(n.isNull(2))
+    let f = cartography.columnFromTexts(name: "f", values: ["1.5", "2"])
+    expect(f.kind == cartography.FieldKind.float)
+    let codes = cartography.columnFromTexts(name: "zip", values: ["007", "123"])
+    expect(codes.kind == cartography.FieldKind.text)
+    expect(cartography.formatNumber(12.0) == "12")
+    expect(cartography.formatNumber(0.125, decimals: 2) == "0.13" || cartography.formatNumber(0.125, decimals: 2) == "0.12")
+    expect(cartography.groupedNumber(1234567.0) == "1,234,567")
+}
+
+test "class breaks" {
+    let values: [Float] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    let equal = cartography.classBreaks(values, mode: .equalInterval, count: 3)
+    expect(equal.count == 4)
+    expect(coreNear(equal[1], 4.0, 0.000000001))
+    expect(coreNear(equal[2], 7.0, 0.000000001))
+    // Natural breaks put the gaps where they are: each break is the
+    // first value of the class above it.
+    let jenks = cartography.classBreaks([1, 1, 2, 2, 10, 11, 12, 30, 31], mode: .naturalBreaks, count: 3)
+    expect(jenks == [1.0, 10.0, 30.0, 31.0])
+}
+
+test "categorized and graduated styles class features" {
+    var l = coreSquareLayer()
+    l.style = cartography.categorizedStyle(layer: l, field: "name")
+    expect(l.style.classes.count == 2)
+    l.project(to: cartography.lonLat())
+    expect(l.classOf == [0, 1])
+    l.style = cartography.graduatedStyle(layer: l, field: "v", mode: .equalInterval, count: 2, ramp: "Blues")
+    l.refresh()
+    expect(l.classOf == [0, 1])
+    let c0 = cartography.rampColor("Blues", 0.0)
+    expect(c0.r == 247 && c0.g == 251 && c0.b == 255)
+}
+
+test "colors from hex" {
+    let c = cartography.colorFromHex("#1f77b4")
+    expect(c?.r == 31 && c?.g == 119 && c?.b == 180)
+    expect(cartography.colorFromHex("abc")?.g == 187)
+    if let _bad = cartography.colorFromHex("nope") {
+        fail("nope is not a color")
+    }
+}
+
+test "a map reprojects layers into Web Mercator" {
+    var m = cartography.Map()
+    m.add(coreSquareLayer())
+    let s = m.layers[0].shapes[1]
+    // 2°E on the equator in Web Mercator.
+    expect(coreNear(s.box.minX, 222638.98158654713, 0.000001))
+    expect(coreNear(s.box.minY, 0.0, 0.000001))
+    expect(coreNear(s.box.maxY, 111325.14286638486, 0.000001))
+    expect(m.version > 0)
+}
+
+test "a map finds the features under a point" {
+    var m = cartography.Map()
+    m.add(coreSquareLayer())
+    m.vp.resize(400, 200)
+    m.vp.smooth = false
+    m.fitAll()
+    let (sx, sy) = m.fromLonLat(2.5, 0.5)
+    let hit = m.featureAt(sx, sy)
+    expect(hit?.layer == 0)
+    expect(hit?.row == 1)
+    let (hx, hy) = m.fromLonLat(0.5, 0.5)
+    if let _miss = m.featureAt(hx, hy) {
+        fail("the hole has no feature")
+    }
+    let (lon, lat) = m.toLonLat(sx, sy)
+    expect(coreNear(lon, 2.5, 0.000000001))
+    expect(coreNear(lat, 0.5, 0.000000001))
+    // A box around the first square only.
+    let (x1, y1) = m.fromLonLat(-0.5, 1.5)
+    let (x2, y2) = m.fromLonLat(1.5, -0.5)
+    expect(m.featuresIn(layer: 0, x1, y1, x2, y2) == [0])
+    m.select(layer: 0, rows: [1])
+    expect(m.layers[0].selection == [1])
+    m.clearSelection()
+    expect(m.layers[0].selection.isEmpty)
+    let values = m.attributes(cartography.Hit(layer: 0, row: 1))
+    expect(values[0].1 == "b")
+    expect(values[1].1 == "5")
+}
+
+test "a map in another system keeps its place" {
+    var m = cartography.Map()
+    m.add(coreSquareLayer())
+    m.vp.resize(400, 200)
+    m.vp.smooth = false
+    m.centerOn(lon: 1.5, lat: 0.5, scale: 1000000)
+    expect(coreNear(m.scaleDenominator(), 1000000.0, 1000.0))
+    m.setCrs(cartography.lonLat())
+    expect(coreNear(m.vp.centerX, 1.5, 0.000000001))
+    expect(coreNear(m.vp.centerY, 0.5, 0.000000001))
+    expect(coreNear(m.layers[0].shapes[1].box.minX, 2.0, 0.000000001))
+    expect(coreNear(m.scaleDenominator(), 1000000.0, 5000.0))
+    m.setScaleDenominator(50000)
+    expect(coreNear(m.scaleDenominator(), 50000.0, 50.0))
+}
+
+test "a scale bar is a round length" {
+    var m = cartography.Map()
+    m.add(coreSquareLayer())
+    m.vp.resize(400, 200)
+    m.vp.smooth = false
+    m.centerOn(lon: 1.5, lat: 0.5, scale: 1000000)
+    let bar = cartography.mapScaleBar(m, maxWidth: 120)
+    // 120 points at 1:1 000 000 and 96 per inch is 31.75 km: 20 km fits.
+    expect(bar.label == "20 km")
+    expect(coreNear(bar.points, 75.59, 0.1))
+    let feet = cartography.mapScaleBar(m, maxWidth: 120, imperial: true)
+    expect(feet.label == "10 mi")
+}
+
+test "a legend lists layers and classes" {
+    var m = cartography.Map()
+    var l = coreSquareLayer()
+    l.style = cartography.categorizedStyle(layer: l, field: "name")
+    m.add(l)
+    var pts = cartography.Layer(name: "Points", geomKind: .point)
+    pts.geoms = [cartography.pointGeometry(0.5, 0.5)]
+    m.add(pts)
+    let e = cartography.legendEntries(m)
+    expect(e.count == 4)
+    expect(e[0].text == "Points")
+    expect(e[1].heading)
+    expect(e[2].text == "a")
+}
+
+test "layers move, insert and go" {
+    var m = cartography.Map()
+    m.add(coreSquareLayer())
+    var b = coreSquareLayer()
+    b.name = "Other"
+    m.add(b)
+    m.move(from: 1, to: 0)
+    expect(m.layers[0].name == "Other")
+    expect(m.layerIndex(named: "Squares") == 1)
+    m.remove(at: 0)
+    expect(m.layers.count == 1)
+}
+
+test "a map saves as a picture" {
+    var m = cartography.Map()
+    m.add(coreSquareLayer())
+    m.vp.resize(300, 200)
+    m.vp.smooth = false
+    m.fitAll()
+    let path = joinPath(tempFolder(), "cartography-core-test.png")
+    expect(m.savePicture(path, width: 300, height: 200, scale: 1))
+    expect(imageSize(path)?.0 == 300)
+}

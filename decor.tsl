@@ -1,0 +1,237 @@
+// cartography: what goes around a map. A scale bar in meters or
+// kilometers (feet and miles if asked), a north arrow, and a legend of the
+// layers with each class's symbol.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+/// A scale bar for a map: how long it is on the ground, how many points
+/// it takes, and its label ("500 m", "2 km", "1 mi").
+public struct MapScaleBar {
+    meters: Float
+    points: Float
+    label: String
+}
+
+/// The longest round length (1, 2 or 5 times a power of ten) that fits in
+/// `maxWidth` points at the middle of the map. With `imperial`, in feet
+/// and miles.
+public fn mapScaleBar(_ m: Map, maxWidth: Float = 120.0, imperial: Bool = false) -> MapScaleBar {
+    var perUnit = m.metersOnGround(m.vp.centerX, m.vp.centerY)
+    if !(perUnit > 0.0) {
+        let (_, lat) = m.crs.toWGS84(m.vp.centerX, m.vp.centerY)
+        perUnit = metersPerUnit(m.crs, lat: if lat.isFinite { lat } else { 0.0 })
+    }
+    let metersPerPoint = perUnit * unitsPerPoint(m.vp)
+    if !(metersPerPoint > 0.0) || !metersPerPoint.isFinite {
+        return MapScaleBar(meters: 0.0, points: 0.0, label: "")
+    }
+    let most = maxWidth * metersPerPoint
+    if imperial {
+        let feet = most / 0.3048
+        if feet >= 5280.0 {
+            let miles = roundDown(feet / 5280.0)
+            return MapScaleBar(meters: miles * 1609.344, points: miles * 1609.344 / metersPerPoint, label: "{formatNumber(miles)} mi")
+        }
+        let ft = roundDown(feet)
+        return MapScaleBar(meters: ft * 0.3048, points: ft * 0.3048 / metersPerPoint, label: "{formatNumber(ft)} ft")
+    }
+    let length = roundDown(most)
+    let label = if length >= 1000.0 { "{formatNumber(length / 1000.0)} km" } else { "{formatNumber(length)} m" }
+    MapScaleBar(meters: length, points: length / metersPerPoint, label: label)
+}
+
+// The largest 1, 2 or 5 × 10^n not above x.
+private fn roundDown(_ x: Float) -> Float {
+    if !(x > 0.0) || !x.isFinite {
+        return 0.0
+    }
+    let power = powerOfTen(Int(floor(log10(x))))
+    let lead = x / power
+    if lead >= 5.0 {
+        return 5.0 * power
+    }
+    if lead >= 2.0 {
+        return 2.0 * power
+    }
+    power
+}
+
+/// Draws a scale bar with its left end at (x, y) (the bar's baseline).
+public fn drawMapScaleBar(_ g: Graphics, _ m: Map, x: Float, y: Float, maxWidth: Float = 120.0, imperial: Bool = false, color: Color = .rgb(40, 40, 40)) {
+    let bar = mapScaleBar(m, maxWidth: maxWidth, imperial: imperial)
+    if bar.points <= 0.0 {
+        return
+    }
+    let halo: Color = .rgba(255, 255, 255, 0.8)
+    g.beginPath()
+    g.moveTo(x, y - 6)
+    g.lineTo(x, y)
+    g.lineTo(x + bar.points, y)
+    g.lineTo(x + bar.points, y - 6)
+    g.stroke(halo, width: 4.0)
+    g.stroke(color, width: 1.5)
+    g.text(bar.label, x: x + bar.points / 2.0, y: y - 4, size: 11, color: color, align: .bottom, halo: halo, haloWidth: 2)
+}
+
+/// Draws an arrow pointing to the map's north (up the map's y axis, turned
+/// with the map) centered on (x, y).
+public fn drawNorthArrow(_ g: Graphics, _ m: Map, x: Float, y: Float, size: Float = 28.0, color: Color = .rgb(40, 40, 40)) {
+    let a = m.vp.angle
+    let ux = -sin(a)
+    let uy = -cos(a)
+    let r = size / 2.0
+    g.beginPath()
+    g.moveTo(x + ux * r, y + uy * r)
+    g.lineTo(x - uy * r * 0.45 - ux * r * 0.6, y + ux * r * 0.45 - uy * r * 0.6)
+    g.lineTo(x - ux * r * 0.25, y - uy * r * 0.25)
+    g.lineTo(x + uy * r * 0.45 - ux * r * 0.6, y - ux * r * 0.45 - uy * r * 0.6)
+    g.closePath()
+    g.fill(color)
+    g.stroke(.rgba(255, 255, 255, 0.8), width: 1.0)
+    g.text("N", x: x - ux * (r + 8), y: y - uy * (r + 8), size: 11, color: color, weight: .semibold, align: .center, halo: .rgba(255, 255, 255, 0.8), haloWidth: 2)
+}
+
+/// One line of a legend: a symbol and what it stands for, or a layer's
+/// name as a heading (`heading`, with no symbol).
+public struct LegendEntry {
+    text: String
+    heading: Bool = false
+    kind: GeomKind = GeomKind.point
+    symbol: Symbol = Symbol()
+}
+
+/// What a legend of the map shows: each visible vector layer (top layer
+/// first) with its symbol, or its name and then each of its classes.
+/// Raster layers with a ramp show their lowest and highest values.
+public fn legendEntries(_ m: Map) -> [LegendEntry] {
+    var out: [LegendEntry] = []
+    var i = m.layers.count - 1
+    while i >= 0 {
+        let l = m.layers[i]
+        i -= 1
+        if !l.visible {
+            continue
+        }
+        if l.kind == .raster && l.rasterStyle.look == .ramp {
+            out.append(LegendEntry(text: l.name, heading: true))
+            let s = l.rasterStyle
+            let lo = Symbol(fill: legendRampColor(s, 0.0), stroke: Rgba(r: 0, g: 0, b: 0, a: 0.0), strokeWidth: 0.0)
+            let hi = Symbol(fill: legendRampColor(s, 1.0), stroke: Rgba(r: 0, g: 0, b: 0, a: 0.0), strokeWidth: 0.0)
+            out.append(LegendEntry(text: formatNumber(s.high, decimals: 2), kind: .polygon, symbol: hi))
+            out.append(LegendEntry(text: formatNumber(s.low, decimals: 2), kind: .polygon, symbol: lo))
+            continue
+        }
+        if l.kind != .vector {
+            continue
+        }
+        if l.style.kind == .single || l.style.classes.isEmpty {
+            out.append(LegendEntry(text: l.name, kind: l.geomKind, symbol: l.style.symbol))
+            continue
+        }
+        out.append(LegendEntry(text: l.name, heading: true))
+        for c in l.style.classes {
+            if c.visible {
+                let text = if c.label.isEmpty { c.value } else { c.label }
+                out.append(LegendEntry(text: text, kind: l.geomKind, symbol: c.symbol))
+            }
+        }
+    }
+    out
+}
+
+// A raster ramp's color at t (0: low, 1: high), its own colors or the named ramp's.
+private fn legendRampColor(_ s: RasterStyle, _ t0: Float) -> Rgba {
+    let t = if s.invert { 1.0 - t0 } else { t0 }
+    if s.colors.count >= 2 {
+        return if t < 0.5 { s.colors[0] } else { s.colors[s.colors.count - 1] }
+    }
+    rampColor(s.ramp, t)
+}
+
+/// Draws a legend in a box with its top left corner at (x, y), and returns
+/// the box's size (width, height). `maxEntries` cuts a long legend short.
+public fn drawLegend(_ g: Graphics, _ m: Map, x: Float, y: Float, maxEntries: Int = 30, title: String = "") -> (Float, Float) {
+    let entries = legendEntries(m)
+    if entries.isEmpty && title.isEmpty {
+        return (0.0, 0.0)
+    }
+    let shown = entries.prefix(maxEntries)
+    let rowH = 18.0
+    let pad = 8.0
+    var width = 0.0
+    if !title.isEmpty {
+        width = g.textWidth(title, size: 12, weight: .bold)
+    }
+    for e in shown {
+        let w = if e.heading { g.textWidth(e.text, size: 11, weight: .semibold) } else { 26.0 + g.textWidth(e.text, size: 11) }
+        width = max(width, w)
+    }
+    let titleH = if title.isEmpty { 0.0 } else { 20.0 }
+    let more = entries.count > shown.count
+    let height = titleH + Float(shown.count + (if more { 1 } else { 0 })) * rowH + 2.0 * pad
+    let boxW = width + 2.0 * pad
+    g.fillRect(x: x, y: y, width: boxW, height: height, color: .rgba(255, 255, 255, 0.9), radius: 6)
+    g.strokeRect(x: x, y: y, width: boxW, height: height, color: .rgba(0, 0, 0, 0.15), lineWidth: 1.0, radius: 6)
+    var cy = y + pad
+    let ink: Color = .rgb(40, 40, 40)
+    if !title.isEmpty {
+        g.text(title, x: x + pad, y: cy + 8, size: 12, color: ink, weight: .bold, align: .leading)
+        cy += titleH
+    }
+    for e in shown {
+        let mid = cy + rowH / 2.0
+        if e.heading {
+            g.text(e.text, x: x + pad, y: mid, size: 11, color: ink, weight: .semibold, align: .leading)
+        } else {
+            drawSwatch(g, e.kind, e.symbol, x: x + pad, y: mid - 7, width: 20, height: 14)
+            g.text(e.text, x: x + pad + 26, y: mid, size: 11, color: ink, align: .leading)
+        }
+        cy += rowH
+    }
+    if more {
+        g.text("…", x: x + pad, y: cy + rowH / 2.0, size: 11, color: ink, align: .leading)
+    }
+    (boxW, height)
+}
+
+/// Draws a symbol as a legend shows it, in a box of the screen: a marker
+/// in the middle, a line across, or a filled rectangle.
+public fn drawSwatch(_ g: Graphics, _ kind: GeomKind, _ s: Symbol, x: Float, y: Float, width: Float, height: Float) {
+    let fill = s.fill.color()
+    let stroke = s.stroke.color()
+    match kind {
+        .point -> {
+            let r = min(s.size, height) / 2.0
+            g.save()
+            g.translate(x + width / 2.0, y + height / 2.0)
+            g.scale(1.0, -1.0)
+            g.beginPath()
+            addMarker(g, s.marker, 0.0, 0.0, r, turn: s.rotation)
+            g.fill(fill)
+            if s.strokeWidth > 0.0 {
+                g.stroke(stroke, width: s.strokeWidth)
+            }
+            g.restore()
+        }
+        .line -> {
+            g.beginPath()
+            g.moveTo(x, y + height / 2.0)
+            g.lineTo(x + width, y + height / 2.0)
+            if s.casing {
+                g.stroke(s.casingColor.color(), width: min(s.strokeWidth, height) + 2.0 * s.casingWidth)
+            }
+            g.stroke(stroke, width: max(min(s.strokeWidth, height), 1.0), dash: s.dash)
+        }
+        .polygon -> {
+            g.beginPath()
+            g.rect(x: x, y: y, width: width, height: height)
+            if s.fillStyle == .solid {
+                g.fill(fill)
+            }
+            if s.strokeWidth > 0.0 {
+                g.stroke(stroke, width: min(s.strokeWidth, 2.0), dash: s.dash)
+            }
+        }
+    }
+}

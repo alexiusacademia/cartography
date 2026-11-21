@@ -1,0 +1,66 @@
+// cartography's example: a map of a few made-up provinces, a highway and
+// towns, in a MapView with a legend. Click a feature to see its values.
+// `tessel run examples` opens it.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import ".."
+
+fn sampleMap() -> cartography.Map {
+    var m = cartography.Map()
+    var land = cartography.Layer(name: "Provinces", geomKind: .polygon)
+    land.columns = [
+        cartography.textColumn(name: "name", values: ["North", "South", "East"]),
+        cartography.numberColumn(name: "population", values: [120000, 340000, 80000], whole: true),
+    ]
+    land.geoms = [
+        cartography.polygonGeometry([[120.0, 15.0, 122.0, 15.0, 122.0, 17.0, 120.0, 17.0], [120.5, 15.5, 121.0, 15.5, 121.0, 16.0, 120.5, 16.0]]),
+        cartography.polygonGeometry([[120.0, 13.0, 122.5, 13.0, 121.5, 14.8, 120.0, 14.8]]),
+        cartography.polygonGeometry([[122.2, 14.0, 124.0, 14.2, 123.6, 16.0, 122.4, 15.6]]),
+    ]
+    land.style = cartography.graduatedStyle(layer: land, field: "population", mode: .equalInterval, count: 3, ramp: "YlGnBu")
+    land.labels = cartography.LabelStyle(enabled: true, field: "name", size: 13, bold: true)
+    m.add(land)
+    var roads = cartography.Layer(name: "Highway", geomKind: .line)
+    roads.geoms = [cartography.lineGeometry([119.8, 13.5, 121.0, 14.9, 121.4, 16.5, 122.3, 16.9])]
+    roads.columns = [cartography.textColumn(name: "name", values: ["Maharlika Highway"])]
+    roads.style.symbol = cartography.Symbol(stroke: cartography.rgb(200, 40, 40), strokeWidth: 3, casing: true)
+    roads.labels = cartography.LabelStyle(enabled: true, field: "name", curved: true)
+    m.add(roads)
+    var towns = cartography.Layer(name: "Towns", geomKind: .point)
+    towns.geoms = [cartography.pointGeometry(121.0, 14.6), cartography.pointGeometry(120.6, 16.4), cartography.pointGeometry(123.2, 15.1)]
+    towns.columns = [cartography.textColumn(name: "name", values: ["Manila", "Baguio", "Daet"])]
+    towns.style.symbol = cartography.Symbol(fill: cartography.rgb(30, 90, 200), size: 11, marker: .star)
+    towns.labels = cartography.LabelStyle(enabled: true, field: "name")
+    m.add(towns)
+    m
+}
+
+app MapDemo(title: "cartography", width: 900, height: 620) {
+    state m = sampleMap()
+    state mouse = ""
+    state picked = "Click a feature"
+
+    VStack(spacing: 0) {
+        cartography.MapView(map: m, northArrow: true, legend: true, onMouse: { lon, lat in
+            mouse = "{lat.formatted(decimals: 4)}°, {lon.formatted(decimals: 4)}°"
+        }) { hit in
+            if let h = hit {
+                let values = m.attributes(h).map { p in "{p.0}: {p.1}" }.joined(separator: ", ")
+                picked = "{m.layers[h.layer].name}: {values}"
+            } else {
+                picked = "Nothing there"
+            }
+        }
+        Divider()
+        HStack {
+            Text(picked)
+            Spacer()
+            Text(mouse).color(.secondary)
+            Text("1:{cartography.groupedNumber(m.scaleDenominator())}").color(.secondary)
+        }
+        .font(size: 12)
+        .padding(8)
+    }
+}
