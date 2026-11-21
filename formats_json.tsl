@@ -1,0 +1,502 @@
+// cartography: reading JSON text byte by byte (for GeoJSON).
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+//
+// A `FmtJsonCursor` walks over the bytes of a document. Its methods read the
+// value at `pos` and leave `pos` after it. The first thing found wrong is
+// kept in `err` (with where it is), and the cursor jumps to the end so that
+// every loop over it stops; callers look at `failed()` when they're done.
+
+struct FmtJsonCursor {
+    d: Data
+    pos: Int = 0
+    /// What was wrong, or "" while all is well.
+    err: String = ""
+    /// How deep in arrays and objects `skipValue` is.
+    depth: Int = 0
+
+    fn failed() -> Bool {
+        !err.isEmpty
+    }
+
+    /// "line 3, column 14" for a place in the bytes.
+    fn place(_ at: Int) -> String {
+        var line = 1
+        var start = 0
+        var i = 0
+        let end = min(at, d.count)
+        while i < end {
+            if d[i] == 10 {
+                line += 1
+                start = i + 1
+            }
+            i += 1
+        }
+        "line {line}, column {end - start + 1}"
+    }
+
+    /// Notes what's wrong at `pos` (only the first time).
+    fn fail(_ what: String) {
+        if err.isEmpty {
+            err = what + " at " + place(pos)
+        }
+        pos = d.count
+    }
+
+    fn skipSpace() {
+        let n = d.count
+        while pos < n {
+            let c = d[pos]
+            if c == 32 || c == 10 || c == 13 || c == 9 {
+                pos += 1
+            } else {
+                break
+            }
+        }
+    }
+
+    /// The byte at `pos`, or -1 at the end.
+    fn peek() -> Int {
+        if pos < d.count { d[pos] } else { -1 }
+    }
+
+    /// The next byte that isn't space (not passed), or -1 at the end.
+    fn next() -> Int {
+        skipSpace()
+        if pos < d.count { d[pos] } else { -1 }
+    }
+
+    /// Passes the byte `byte` (after any space), or fails saying `what`
+    /// was expected.
+    fn expect(_ byte: Int, _ what: String) {
+        skipSpace()
+        if pos < d.count && d[pos] == byte {
+            pos += 1
+        } else if pos >= d.count {
+            fail("the text ends where {what} was expected")
+        } else {
+            fail("expected {what}")
+        }
+    }
+
+    /// After a value in an array or object: passes a comma and gives true,
+    /// or passes `close` and gives false.
+    fn more(_ close: Int) -> Bool {
+        skipSpace()
+        if pos < d.count {
+            let c = d[pos]
+            if c == 44 {
+                pos += 1
+                return true
+            }
+            if c == close {
+                pos += 1
+                return false
+            }
+            fail(if close == 93 { "expected , or ]" } else { "expected , or \}" })
+            return false
+        }
+        fail(if close == 93 { "the text ends inside an array" } else { "the text ends inside an object" })
+        false
+    }
+
+    /// Four hex digits at `pos` as a number, or -1.
+    fn hex4() -> Int {
+        if pos + 4 > d.count {
+            return -1
+        }
+        var v = 0
+        for i in 0..4 {
+            let c = d[pos + i]
+            var digit = -1
+            if c >= 48 && c <= 57 {
+                digit = c - 48
+            } else if c >= 97 && c <= 102 {
+                digit = c - 87
+            } else if c >= 65 && c <= 70 {
+                digit = c - 55
+            }
+            if digit < 0 {
+                return -1
+            }
+            v = v * 16 + digit
+        }
+        pos += 4
+        v
+    }
+
+    /// Reads a string (with its quotes) and gives its text.
+    fn string() -> String {
+        skipSpace()
+        if peek() != 34 {
+            fail("expected a string")
+            return ""
+        }
+        pos += 1
+        let start = pos
+        let n = d.count
+        // Most strings have no escapes: they're a slice of the bytes.
+        while pos < n {
+            let c = d[pos]
+            if c == 34 {
+                let s = d.slice(from: start, to: pos)
+                pos += 1
+                return fmtText(s)
+            }
+            if c == 92 {
+                break
+            }
+            pos += 1
+        }
+        var out: [Int] = d.slice(from: start, to: pos).bytes
+        while pos < n {
+            let c = d[pos]
+            if c == 34 {
+                pos += 1
+                return fmtText(Data(bytes: out))
+            }
+            if c != 92 {
+                out.append(c)
+                pos += 1
+                continue
+            }
+            if pos + 1 >= n {
+                break
+            }
+            let e = d[pos + 1]
+            pos += 2
+            if e == 110 {
+                out.append(10)
+            } else if e == 116 {
+                out.append(9)
+            } else if e == 114 {
+                out.append(13)
+            } else if e == 98 {
+                out.append(8)
+            } else if e == 102 {
+                out.append(12)
+            } else if e == 34 || e == 92 || e == 47 {
+                out.append(e)
+            } else if e == 117 {
+                var code = hex4()
+                if code < 0 {
+                    pos -= 2
+                    fail("\\u needs four hex digits")
+                    return ""
+                }
+                if code >= 55296 && code <= 56319 {
+                    // The first half of a pair: the second must follow.
+                    var paired = false
+                    if pos + 1 < n && d[pos] == 92 && d[pos + 1] == 117 {
+                        let back = pos
+                        pos += 2
+                        let low = hex4()
+                        if low >= 56320 && low <= 57343 {
+                            code = 65536 + (code - 55296) * 1024 + (low - 56320)
+                            paired = true
+                        } else {
+                            pos = back
+                        }
+                    }
+                    if !paired {
+                        code = 65533
+                    }
+                } else if code >= 56320 && code <= 57343 {
+                    code = 65533
+                }
+                out.appendAll(fmtJsonUtf8(code))
+            } else {
+                pos -= 2
+                fail("unknown escape in a string")
+                return ""
+            }
+        }
+        pos = start - 1
+        fail("a string isn't closed")
+        ""
+    }
+
+    /// Passes a string without making its text.
+    fn skipString() {
+        let start = pos
+        pos += 1
+        let n = d.count
+        while pos < n {
+            let c = d[pos]
+            if c == 34 {
+                pos += 1
+                return
+            }
+            if c == 92 {
+                let e = if pos + 1 < n { d[pos + 1] } else { 0 }
+                if !(e == 34 || e == 92 || e == 47 || e == 98 || e == 102 || e == 110 || e == 114 || e == 116 || e == 117) {
+                    fail("unknown escape in a string")
+                    return
+                }
+                pos += 2
+            } else {
+                pos += 1
+            }
+        }
+        pos = start
+        fail("a string isn't closed")
+    }
+
+    /// Passes a number.
+    fn scanNumber() {
+        skipSpace()
+        let n = d.count
+        if pos < n && d[pos] == 45 {
+            pos += 1
+        }
+        var digits = pos
+        while pos < n && d[pos] >= 48 && d[pos] <= 57 {
+            pos += 1
+        }
+        if pos == digits {
+            fail("expected a number")
+            return
+        }
+        if pos < n && d[pos] == 46 {
+            pos += 1
+            digits = pos
+            while pos < n && d[pos] >= 48 && d[pos] <= 57 {
+                pos += 1
+            }
+            if pos == digits {
+                fail("a number needs digits after its point")
+                return
+            }
+        }
+        if pos < n && (d[pos] == 101 || d[pos] == 69) {
+            pos += 1
+            if pos < n && (d[pos] == 43 || d[pos] == 45) {
+                pos += 1
+            }
+            digits = pos
+            while pos < n && d[pos] >= 48 && d[pos] <= 57 {
+                pos += 1
+            }
+            if pos == digits {
+                fail("a number needs digits in its exponent")
+            }
+        }
+    }
+
+    /// Reads a number and gives it as it's written.
+    fn numberText() -> String {
+        skipSpace()
+        let start = pos
+        scanNumber()
+        if failed() {
+            return ""
+        }
+        d.slice(from: start, to: pos).text ?? ""
+    }
+
+    fn number() -> Float {
+        skipSpace()
+        let start = pos
+        scanNumber()
+        if failed() {
+            return 0.0
+        }
+        Float(d.slice(from: start, to: pos).text ?? "") ?? 0.0
+    }
+
+    /// Passes the word `word` (true, false or null) if it's at `pos`.
+    fn word(_ word: String) -> Bool {
+        let w = Data(text: word)
+        if pos + w.count > d.count {
+            return false
+        }
+        for i in 0..w.count {
+            if d[pos + i] != w[i] {
+                return false
+            }
+        }
+        pos += w.count
+        true
+    }
+
+    /// Passes `null` if it's next, and says whether it was.
+    fn null() -> Bool {
+        skipSpace()
+        if peek() == 110 {
+            if word("null") {
+                return true
+            }
+            fail("expected null")
+        }
+        false
+    }
+
+    /// Passes a whole value of any kind, checking that it's well formed.
+    fn skipValue() {
+        skipSpace()
+        let c = peek()
+        if c == 34 {
+            skipString()
+        } else if c == 123 {
+            depth += 1
+            if depth > 400 {
+                fail("objects and arrays are nested too deeply")
+                return
+            }
+            pos += 1
+            if next() == 125 {
+                pos += 1
+            } else {
+                while !failed() {
+                    skipSpace()
+                    if peek() != 34 {
+                        fail("expected a name in quotes")
+                        return
+                    }
+                    skipString()
+                    expect(58, ":")
+                    skipValue()
+                    if !more(125) {
+                        break
+                    }
+                }
+            }
+            depth -= 1
+        } else if c == 91 {
+            depth += 1
+            if depth > 400 {
+                fail("objects and arrays are nested too deeply")
+                return
+            }
+            pos += 1
+            if next() == 93 {
+                pos += 1
+            } else {
+                while !failed() {
+                    skipValue()
+                    if !more(93) {
+                        break
+                    }
+                }
+            }
+            depth -= 1
+        } else if c == 45 || (c >= 48 && c <= 57) {
+            scanNumber()
+        } else if c == 116 && word("true") {
+            return
+        } else if c == 102 && word("false") {
+            return
+        } else if c == 110 && word("null") {
+            return
+        } else if c < 0 {
+            fail("the text ends where a value was expected")
+        } else {
+            fail("expected a value")
+        }
+    }
+
+    /// The text of the value at `pos`, as it's written, passing it.
+    fn rawValue() -> String {
+        skipSpace()
+        let start = pos
+        skipValue()
+        if failed() {
+            return ""
+        }
+        fmtText(d.slice(from: start, to: pos))
+    }
+
+    /// Looks through the value at `pos` (passing it) for a member called
+    /// `name` whose value is a string, at any depth; "" if there's none.
+    fn findString(_ name: String) -> String {
+        if next() != 123 {
+            skipValue()
+            return ""
+        }
+        pos += 1
+        var found = ""
+        if next() == 125 {
+            pos += 1
+            return ""
+        }
+        while !failed() {
+            let key = string()
+            expect(58, ":")
+            let c = next()
+            if c == 34 && key == name {
+                found = string()
+            } else if c == 123 {
+                let inner = findString(name)
+                if found.isEmpty {
+                    found = inner
+                }
+            } else {
+                skipValue()
+            }
+            if !more(125) {
+                break
+            }
+        }
+        found
+    }
+}
+
+/// The bytes of a character in UTF-8.
+fn fmtJsonUtf8(_ code: Int) -> [Int] {
+    if code < 128 {
+        return [code]
+    }
+    if code < 2048 {
+        return [192 + code / 64, 128 + code % 64]
+    }
+    if code < 65536 {
+        return [224 + code / 4096, 128 + (code / 64) % 64, 128 + code % 64]
+    }
+    [240 + code / 262144, 128 + (code / 4096) % 64, 128 + (code / 64) % 64, 128 + code % 64]
+}
+
+/// Text as a JSON string, with its quotes.
+fn fmtJsonQuoted(_ text: String) -> String {
+    let d = Data(text: text)
+    var plain = true
+    for i in 0..d.count {
+        let c = d[i]
+        if c < 32 || c == 34 || c == 92 {
+            plain = false
+            break
+        }
+    }
+    if plain {
+        return "\"" + text + "\""
+    }
+    let hex = "0123456789abcdef".characters
+    var out: [Int] = [34]
+    var pieces: [String] = []
+    for i in 0..d.count {
+        let c = d[i]
+        if c == 34 || c == 92 {
+            out.append(92)
+            out.append(c)
+        } else if c == 10 {
+            out.append(92)
+            out.append(110)
+        } else if c == 13 {
+            out.append(92)
+            out.append(114)
+        } else if c == 9 {
+            out.append(92)
+            out.append(116)
+        } else if c < 32 {
+            // \u00XX
+            pieces.append(Data(bytes: out).text ?? "")
+            pieces.append("\\u00" + hex[c / 16] + hex[c % 16])
+            out = []
+        } else {
+            out.append(c)
+        }
+    }
+    out.append(34)
+    pieces.append(Data(bytes: out).text ?? "")
+    pieces.joined()
+}

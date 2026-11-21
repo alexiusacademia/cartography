@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="oracle" xmlns="http://www.topografix.com/GPX/1/1">
+<metadata><name>trip</name></metadata>
+<wpt lat="14.6" lon="121.0"><ele>10.5</ele><name>a</name></wpt>
+<wpt lat="40.758896" lon="-73.98543"><ele>20.0</ele><name>b &amp; c</name></wpt>
+<wpt lat="48.8584" lon="2.2945"><ele>30.25</ele><name>d</name></wpt>
+<rte><name>route one</name><rtept lat="14.5" lon="121.0"/><rtept lat="14.6" lon="121.1"/><rtept lat="14.55" lon="121.2"/></rte>
+<trk><name>morning walk</name><trkseg><trkpt lat="15.0" lon="120.0"><ele>3</ele></trkpt><trkpt lat="15.02" lon="120.01"/></trkseg><trkseg><trkpt lat="15.03" lon="120.02"/><trkpt lat="15.04" lon="120.05"/><trkpt lat="15.0" lon="120.06"/></trkseg></trk>
+</gpx>

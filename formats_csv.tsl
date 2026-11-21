@@ -1,0 +1,492 @@
+// cartography: delimited text (CSV, TSV and the like), with the shapes in
+// two columns of coordinates or in a column of WKT.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+/// What delimited text looks like before it's read as a layer.
+public struct CsvInfo {
+    /// What separates the values: "," ";" a tab or "|".
+    delimiter: String = ","
+    /// The names in the first line.
+    fields: [String] = []
+    /// The fields that look like they hold x and y (or longitude and
+    /// latitude), or "" if there are none.
+    xField: String = ""
+    yField: String = ""
+    /// The field that looks like it holds WKT, or "".
+    wktField: String = ""
+    /// How many rows there are after the first line.
+    rows: Int = 0
+}
+
+/// The values of a delimited text file, column by column.
+struct FmtCsvTable {
+    delimiter: Int = 44
+    names: [String] = []
+    columns: [[String]] = []
+    rows: Int = 0
+}
+
+/// How many times `delimiter` is in each of the first lines of the text
+/// (outside quotes).
+fn fmtCsvCounts(_ d: Data, from: Int, delimiter: Int) -> [Int] {
+    var counts: [Int] = []
+    var count = 0
+    var quoted = false
+    var any = false
+    var i = from
+    let n = d.count
+    while i < n && counts.count < 20 {
+        let c = d[i]
+        if c == 34 {
+            quoted = !quoted
+            any = true
+        } else if quoted {
+            any = true
+        } else if c == 10 || c == 13 {
+            if any {
+                counts.append(count)
+            }
+            count = 0
+            any = false
+        } else {
+            any = true
+            if c == delimiter {
+                count += 1
+            }
+        }
+        i += 1
+    }
+    if any && counts.count < 20 {
+        counts.append(count)
+    }
+    counts
+}
+
+/// The delimiter the first lines use: the one among , ; tab | that is in
+/// the first line and as many times in most of the lines after it.
+fn fmtCsvDelimiter(_ d: Data, from: Int, prefer: Int) -> Int {
+    var best = 44
+    var bestScore = 0
+    for delimiter in [prefer, 44, 59, 9, 124] {
+        let counts = fmtCsvCounts(d, from: from, delimiter: delimiter)
+        let first = counts.first ?? 0
+        if first == 0 {
+            continue
+        }
+        var same = 0
+        for c in counts {
+            if c == first {
+                same += 1
+            }
+        }
+        let score = same * 1000 / counts.count * 1000 + min(first, 999)
+        if score > bestScore {
+            best = delimiter
+            bestScore = score
+        }
+    }
+    best
+}
+
+/// Reads the whole file into columns. Values may be in quotes, and then
+/// hold delimiters, line breaks and quotes (written twice). A row with
+/// fewer values than the first line is filled with empty ones; values past
+/// the last field are dropped.
+fn fmtCsvParse(_ d: Data, prefer: Int, forced: String = "") -> FmtCsvTable {
+    var pos = 0
+    if d.count >= 3 && d[0] == 239 && d[1] == 187 && d[2] == 191 {
+        pos = 3
+    }
+    let given = Data(text: forced)
+    var table = FmtCsvTable(delimiter: if given.count == 1 { given[0] } else { fmtCsvDelimiter(d, from: pos, prefer: prefer) })
+    let delimiter = table.delimiter
+    let n = d.count
+    var header = true
+    var row: [String] = []
+    var fieldCount = 0
+    while pos < n {
+        // One value.
+        var value = ""
+        if d[pos] == 34 {
+            pos += 1
+            let start = pos
+            var doubled = false
+            while pos < n {
+                if d[pos] == 34 {
+                    if pos + 1 < n && d[pos + 1] == 34 {
+                        doubled = true
+                        pos += 2
+                        continue
+                    }
+                    break
+                }
+                pos += 1
+            }
+            value = fmtText(d.slice(from: start, to: pos))
+            if doubled {
+                value = value.replace("\"\"", with: "\"")
+            }
+            pos += 1
+            // Anything between the closing quote and the delimiter is kept.
+            let rest = pos
+            while pos < n && d[pos] != delimiter && d[pos] != 10 && d[pos] != 13 {
+                pos += 1
+            }
+            if pos > rest {
+                value += fmtText(d.slice(from: rest, to: pos))
+            }
+        } else {
+            let start = pos
+            while pos < n && d[pos] != delimiter && d[pos] != 10 && d[pos] != 13 {
+                pos += 1
+            }
+            value = fmtText(d.slice(from: start, to: pos))
+        }
+        row.append(value)
+        if pos < n && d[pos] == delimiter {
+            pos += 1
+            if pos < n {
+                continue
+            }
+            // The file ends after a delimiter: one last empty value.
+            row.append("")
+        }
+        // The end of a line (or of the file).
+        if pos < n && d[pos] == 13 {
+            pos += 1
+        }
+        if pos < n && d[pos] == 10 {
+            pos += 1
+        }
+        if row.count == 1 && row[0].isEmpty {
+            // An empty line.
+            row = []
+            continue
+        }
+        if header {
+            table.names = fmtCsvNames(row)
+            fieldCount = table.names.count
+            for _ in 0..fieldCount {
+                table.columns.append([])
+            }
+            header = false
+        } else {
+            for i in 0..fieldCount {
+                table.columns[i].append(if i < row.count { row[i] } else { "" })
+            }
+            table.rows += 1
+        }
+        row = []
+    }
+    table
+}
+
+/// The names of the fields: trimmed, with a name made up for an empty one
+/// and a number added to one that's there already.
+fn fmtCsvNames(_ row: [String]) -> [String] {
+    var used = Set<String>()
+    var out: [String] = []
+    for (i, raw) in row.enumerated() {
+        var name = raw.trim()
+        if name.isEmpty {
+            name = "field_{i + 1}"
+        }
+        var candidate = name
+        var k = 2
+        while used.contains(candidate.lowercase()) {
+            candidate = "{name}_{k}"
+            k += 1
+        }
+        used.insert(candidate.lowercase())
+        out.append(candidate)
+    }
+    out
+}
+
+/// The first of `names` that is (whatever its capitals) one of `wanted`,
+/// trying the wanted names in order.
+fn fmtCsvFind(_ names: [String], _ wanted: [String]) -> String {
+    let lower = names.map { n in n.lowercase() }
+    for w in wanted {
+        if let i = lower.index(of: w) {
+            return names[i]
+        }
+    }
+    ""
+}
+
+/// The fields that look like coordinates: x and y, or WKT.
+fn fmtCsvGuess(_ names: [String]) -> (String, String, String) {
+    let xs = ["x", "lon", "lng", "long", "longitude", "easting", "x_coord", "xcoord", "x_coordinate", "coord_x",
+              "point_x", "lon_dd", "longitud", "longitude_deg", "east", "e"]
+    let ys = ["y", "lat", "lat", "lat", "latitude", "northing", "y_coord", "ycoord", "y_coordinate", "coord_y",
+              "point_y", "lat_dd", "latitud", "latitude_deg", "north", "n"]
+    // The two must be of the same family: x with y, lon with lat, …
+    for i in 0..xs.count {
+        let x = fmtCsvFind(names, [xs[i]])
+        let y = fmtCsvFind(names, [ys[i]])
+        if !x.isEmpty && !y.isEmpty {
+            return (x, y, "")
+        }
+    }
+    let x = fmtCsvFind(names, xs)
+    let y = fmtCsvFind(names, ys)
+    if !x.isEmpty && !y.isEmpty {
+        return (x, y, "")
+    }
+    ("", "", fmtCsvFind(names, ["wkt", "geom", "geometry", "the_geom", "wkt_geom", "geom_wkt", "shape"]))
+}
+
+fn fmtCsvPreferred(_ path: String) -> Int {
+    let ext = path.fileExtension.lowercase()
+    if ext == "tsv" || ext == "tab" { 9 } else { 44 }
+}
+
+fn fmtCsvDelimiterText(_ byte: Int) -> String {
+    if byte == 9 {
+        return "\t"
+    }
+    if byte == 59 {
+        return ";"
+    }
+    if byte == 124 {
+        return "|"
+    }
+    ","
+}
+
+/// Looks at delimited text before it's read as a layer: its delimiter,
+/// its fields, which of them seem to hold coordinates, and how many rows
+/// it has.
+public fn inspectCSV(_ text: String) -> CsvInfo {
+    let table = fmtCsvParse(Data(text: text), prefer: 44)
+    let (x, y, wkt) = fmtCsvGuess(table.names)
+    CsvInfo(delimiter: fmtCsvDelimiterText(table.delimiter), fields: table.names, xField: x, yField: y,
+            wktField: wkt, rows: table.rows)
+}
+
+/// A coordinate as a number, or NaN: "121.5", and also "121,5" as it's
+/// written where the comma is the decimal mark.
+fn fmtCsvNumber(_ text: String) -> Float {
+    let t = text.trim()
+    if t.isEmpty {
+        return 0.0 / 0.0
+    }
+    if let x = Float(t) {
+        return if x.isFinite { x } else { 0.0 / 0.0 }
+    }
+    if t.occurrences(of: ",") == 1 && !t.contains(".") {
+        if let x = Float(t.replace(",", with: ".")) {
+            return if x.isFinite { x } else { 0.0 / 0.0 }
+        }
+    }
+    0.0 / 0.0
+}
+
+/// Reads delimited text (CSV, or values separated by ; tabs or |, found
+/// out from the first lines unless `delimiter` gives it) as a layer. The
+/// shapes are points from the fields `x` and `y`, or come from the field
+/// `wkt`; when all three are "", the fields are guessed from their names
+/// (lon/lat, x/y, longitude/latitude, easting/northing, …, or wkt/geometry).
+/// `crs` says what the coordinates are in. Without coordinates the layer
+/// is a table of points without shapes; a row whose coordinates aren't
+/// numbers (or WKT) has no shape. The WKT field isn't kept as a column;
+/// the x and y fields are. A WKT column with shapes of several kinds
+/// gives the layer of the kind most features have.
+public fn readCSV(_ text: String, name: String = "", x: String = "", y: String = "", wkt: String = "",
+                  crs: geodesy.Crs = lonLat(), delimiter: String = "") -> Result<Layer> {
+    let layers = try fmtCsvRead(Data(text: text), label: fmtLabel(name), name: name, source: "", prefer: 44,
+                                xField: x, yField: y, wktField: wkt, crs: crs, delimiter: delimiter)
+    Result.ok(value: fmtMostFeatures(layers))
+}
+
+/// Reads the bytes of delimited text as layers (one for each kind of
+/// shape). `label` names it in errors.
+fn fmtCsvRead(_ d: Data, label: String, name: String, source: String, prefer: Int, xField: String, yField: String,
+              wktField: String, crs: geodesy.Crs, delimiter: String) -> Result<[Layer]> {
+    let path = label
+    let table = fmtCsvParse(d, prefer: prefer, forced: delimiter)
+    if table.names.isEmpty {
+        return .failure(error: fmtReadError(path, "there's nothing in it"))
+    }
+    var x = fmtCsvFind(table.names, [xField.trim().lowercase()])
+    var y = fmtCsvFind(table.names, [yField.trim().lowercase()])
+    var wkt = fmtCsvFind(table.names, [wktField.trim().lowercase()])
+    if xField.isEmpty && yField.isEmpty && wktField.isEmpty {
+        let (gx, gy, gwkt) = fmtCsvGuess(table.names)
+        x = gx
+        y = gy
+        wkt = gwkt
+    } else {
+        if !xField.isEmpty && x.isEmpty {
+            return .failure(error: fmtReadError(path, "it has no field called {xField}"))
+        }
+        if !yField.isEmpty && y.isEmpty {
+            return .failure(error: fmtReadError(path, "it has no field called {yField}"))
+        }
+        if !wktField.isEmpty && wkt.isEmpty {
+            return .failure(error: fmtReadError(path, "it has no field called {wktField}"))
+        }
+        if x.isEmpty != y.isEmpty {
+            return .failure(error: fmtReadError(path, "points need both an x and a y field"))
+        }
+    }
+    var build = FmtBuilder()
+    var columns: [Column] = []
+    var wktAt = -1
+    for (i, name) in table.names.enumerated() {
+        if !wkt.isEmpty && x.isEmpty && name == wkt {
+            wktAt = i
+            continue
+        }
+        columns.append(columnFromTexts(name: name, values: table.columns[i]))
+    }
+    if !x.isEmpty && !y.isEmpty {
+        let xs = table.columns[table.names.index(of: x) ?? 0]
+        let ys = table.columns[table.names.index(of: y) ?? 0]
+        for r in 0..table.rows {
+            let px = fmtCsvNumber(xs[r])
+            let py = fmtCsvNumber(ys[r])
+            if px.isNaN || py.isNaN {
+                build.addNone()
+            } else {
+                build.addGeometry(pointGeometry(px, py))
+            }
+        }
+    } else if wktAt >= 0 {
+        for (r, text) in table.columns[wktAt].enumerated() {
+            if let found = fmtWktShape(Data(text: text)) {
+                let before = build.count()
+                build.add(found.shape)
+                // A GEOMETRYCOLLECTION of several kinds makes several
+                // features: they all get the row's values.
+                for _ in before + 1..build.count() {
+                    for c in 0..columns.count {
+                        columns[c] = fmtCsvRepeated(columns[c], at: before)
+                    }
+                }
+            } else {
+                build.addNone()
+            }
+        }
+    } else {
+        for _ in 0..table.rows {
+            build.addNone()
+        }
+    }
+    Result.ok(value: build.layers(name: name, source: source, crs: crs, columns: columns))
+}
+
+/// The column with the value of row `at` once more after it.
+fn fmtCsvRepeated(_ col: Column, at: Int) -> Column {
+    var out = col
+    if col.kind == .text {
+        out.texts.insert(col.texts[at], at: at + 1)
+    } else {
+        out.nums.insert(col.nums[at], at: at + 1)
+    }
+    out
+}
+
+/// A value as it goes in a CSV file: in quotes if it has a comma, a quote,
+/// a line break or spaces at its ends.
+fn fmtCsvQuoted(_ text: String) -> String {
+    if text.isEmpty {
+        return text
+    }
+    if text.contains(",") || text.contains("\"") || text.contains("\n") || text.contains("\r") ||
+        text.hasPrefix(" ") || text.hasSuffix(" ") || text.contains(";") || text.contains("\t") {
+        return "\"" + text.replace("\"", with: "\"\"") + "\""
+    }
+    text
+}
+
+/// Does the layer have columns that `readCsv` would take for coordinates,
+/// and that say where each feature is? Then the points needn't be written
+/// again.
+fn fmtCsvHasCoordinates(_ layer: Layer) -> Bool {
+    let (x, y, _) = fmtCsvGuess(layer.columns.map { c in c.name })
+    if x.isEmpty || y.isEmpty {
+        return false
+    }
+    let xs = layer.columns[layer.columnIndex(x) ?? 0]
+    let ys = layer.columns[layer.columnIndex(y) ?? 0]
+    for (i, g) in layer.geoms.enumerated() {
+        let px = fmtCsvNumber(fmtCell(xs, i))
+        let py = fmtCsvNumber(fmtCell(ys, i))
+        if g.isEmpty() {
+            if !px.isNaN && !py.isNaN {
+                return false
+            }
+        } else if g.parts[0][0] != px || g.parts[0][1] != py {
+            return false
+        }
+    }
+    true
+}
+
+/// The layer as CSV (with commas), in the layer's CRS. Points go in
+/// columns X and Y before the others, unless the layer already has columns
+/// of coordinates that say the same (as a layer read from a CSV file has);
+/// lines, polygons and points of several go in a column WKT (with every
+/// digit of the coordinates).
+public fn csv(_ layer: Layer) -> String {
+    let rows = layer.geoms.count
+    var useWkt = layer.geomKind != .point
+    if !useWkt {
+        useWkt = layer.geoms.any(where: { g in g.pointCount() > 1 })
+    }
+    let hasShapes = layer.geoms.any(where: { g in !g.isEmpty() })
+    let names = layer.columns.map { c in c.name.lowercase() }
+    var out: [String] = []
+    var head: [String] = []
+    var shapeColumns = 0
+    if hasShapes && useWkt {
+        var name = "WKT"
+        while names.contains(name.lowercase()) {
+            name += "_"
+        }
+        head.append(name)
+        shapeColumns = 1
+    } else if hasShapes && !fmtCsvHasCoordinates(layer) {
+        var xName = "X"
+        var yName = "Y"
+        while names.contains(xName.lowercase()) || names.contains(yName.lowercase()) {
+            xName += "_"
+            yName += "_"
+        }
+        head.append(xName)
+        head.append(yName)
+        shapeColumns = 2
+    }
+    for c in layer.columns {
+        head.append(fmtCsvQuoted(c.name))
+    }
+    out.append(head.joined(separator: ","))
+    out.append("\n")
+    for i in 0..rows {
+        var cells: [String] = []
+        let g = layer.geoms[i]
+        if shapeColumns == 1 {
+            cells.append(if g.isEmpty() { "" } else { fmtCsvQuoted(wkt(g)) })
+        } else if shapeColumns == 2 {
+            if g.isEmpty() {
+                cells.append("")
+                cells.append("")
+            } else {
+                cells.append(fmtShort(g.parts[0][0]))
+                cells.append(fmtShort(g.parts[0][1]))
+            }
+        }
+        for col in layer.columns {
+            cells.append(fmtCsvQuoted(fmtCell(col, i)))
+        }
+        out.append(cells.joined(separator: ","))
+        out.append("\n")
+    }
+    out.joined()
+}

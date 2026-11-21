@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+<Schema name="data" id="data"><SimpleField name="id" type="int"/><SimpleField name="len" type="double"/></Schema>
+<Folder><name>features</name>
+<Placemark><name>A1</name><ExtendedData><SchemaData schemaUrl="#data"><SimpleData name="id">1</SimpleData><SimpleData name="len">2.5</SimpleData></SchemaData></ExtendedData><LineString><coordinates>0.0,0.0 1.0,1.0 2.0,0.5</coordinates></LineString></Placemark>
+<Placemark><name>B2</name><ExtendedData><SchemaData schemaUrl="#data"><SimpleData name="id">2</SimpleData><SimpleData name="len">7.75</SimpleData></SchemaData></ExtendedData><MultiGeometry><LineString><coordinates>10.0,10.0 11.0,12.0</coordinates></LineString><LineString><coordinates>12.0,12.0 13.0,11.0 14.0,15.0</coordinates></LineString></MultiGeometry></Placemark>
+<Placemark><name>C3 ñ</name><ExtendedData><SchemaData schemaUrl="#data"><SimpleData name="id">3</SimpleData><SimpleData name="len">1.0</SimpleData></SchemaData></ExtendedData><LineString><coordinates>-120.5,35.25 -119.75,36.125</coordinates></LineString></Placemark>
+</Folder>
+</Document>
+</kml>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+<Schema name="data" id="data"><SimpleField name="id" type="int"/><SimpleField name="value" type="double"/><SimpleField name="count" type="int"/></Schema>
+<Folder><name>features</name>
+<Placemark><name>Manila</name><ExtendedData><SchemaData schemaUrl="#data"><SimpleData name="id">1</SimpleData><SimpleData name="value">1.5</SimpleData><SimpleData name="count">10</SimpleData></SchemaData></ExtendedData><Point><coordinates>121.0,14.6</coordinates></Point></Placemark>
+<Placemark><name>Times Square, NYC</name><ExtendedData><SchemaData schemaUrl="#data"><SimpleData name="id">2</SimpleData><SimpleData name="value">-2.25</SimpleData><SimpleData name="count">20</SimpleData></SchemaData></ExtendedData><Point><coordinates>-73.98543,40.758896</coordinates></Point></Placemark>
+<Placemark><name>Tour Eiffel "Zoë"</name><ExtendedData><SchemaData schemaUrl="#data"><SimpleData name="id">3</SimpleData><SimpleData name="value">1e-07</SimpleData><SimpleData name="count">30</SimpleData></SchemaData></ExtendedData><Point><coordinates>2.2945,48.8584</coordinates></Point></Placemark>
+<Placemark><name>Sydney Opera</name><ExtendedData><SchemaData schemaUrl="#data"><SimpleData name="id">4</SimpleData><SimpleData name="value">123456.789</SimpleData><SimpleData name="count">40</SimpleData></SchemaData></ExtendedData><Point><coordinates>151.2153,-33.8568</coordinates></Point></Placemark>
+<Placemark><name>Null Island</name><ExtendedData><SchemaData schemaUrl="#data"><SimpleData name="id">5</SimpleData><SimpleData name="count">50</SimpleData></SchemaData></ExtendedData><Point><coordinates>0.0,0.0</coordinates></Point></Placemark>
+</Folder>
+</Document>
+</kml>

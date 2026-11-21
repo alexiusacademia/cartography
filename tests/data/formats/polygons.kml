@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+<Schema name="data" id="data"><SimpleField name="id" type="int"/><SimpleField name="area" type="double"/></Schema>
+<Folder><name>features</name>
+<Placemark><name>park</name><ExtendedData><SchemaData schemaUrl="#data"><SimpleData name="id">1</SimpleData><SimpleData name="area">96.0</SimpleData></SchemaData></ExtendedData><Polygon><outerBoundaryIs><LinearRing><coordinates>0.0,0.0 10.0,0.0 10.0,10.0 0.0,10.0 0.0,0.0</coordinates></LinearRing></outerBoundaryIs><innerBoundaryIs><LinearRing><coordinates>2.0,2.0 2.0,4.0 4.0,4.0 4.0,2.0 2.0,2.0</coordinates></LinearRing></innerBoundaryIs></Polygon></Placemark>
+<Placemark><name>lake</name><ExtendedData><SchemaData schemaUrl="#data"><SimpleData name="id">2</SimpleData><SimpleData name="area">31.5</SimpleData></SchemaData></ExtendedData><MultiGeometry><Polygon><outerBoundaryIs><LinearRing><coordinates>20.0,20.0 25.0,20.0 25.0,25.0 20.0,25.0 20.0,20.0</coordinates></LinearRing></outerBoundaryIs></Polygon><Polygon><outerBoundaryIs><LinearRing><coordinates>30.0,30.0 35.0,30.0 32.5,35.0 30.0,30.0</coordinates></LinearRing></outerBoundaryIs><innerBoundaryIs><LinearRing><coordinates>31.0,31.0 32.5,33.0 34.0,31.0 31.0,31.0</coordinates></LinearRing></innerBoundaryIs></Polygon></MultiGeometry></Placemark>
+<Placemark><name>farm</name><ExtendedData><SchemaData schemaUrl="#data"><SimpleData name="id">3</SimpleData><SimpleData name="area">8.0</SimpleData></SchemaData></ExtendedData><Polygon><outerBoundaryIs><LinearRing><coordinates>-5.0,-5.0 -1.0,-5.0 -3.0,-1.0 -5.0,-5.0</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+</Folder>
+</Document>
+</kml>

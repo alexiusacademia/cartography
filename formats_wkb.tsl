@@ -1,0 +1,268 @@
+// cartography: well-known binary (WKB), the bytes of a shape as
+// databases keep it (and inside every GeoPackage geometry): reading any
+// kind of WKB (both byte orders; Z and M, PostGIS's EWKB and curves are
+// read and their extras dropped) and writing the plain 2D kind.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+struct FmtWkbReader {
+    d: Data
+    pos: Int = 0
+    end: Int = 0
+    shape: FmtShape = FmtShape()
+    /// The bytes ran out, or aren't WKB.
+    failed: Bool = false
+
+    /// A count, and that many points of `step` bytes each, of which the
+    /// first two numbers are x and y.
+    fn coords(big: Bool, step: Int) -> [Float] {
+        var out: [Float] = []
+        if pos + 4 > end {
+            failed = true
+            return out
+        }
+        let n = d.uint32(at: pos, bigEndian: big)
+        pos += 4
+        if n > (end - pos) / step {
+            failed = true
+            return out
+        }
+        for _ in 0..n {
+            out.append(d.float64(at: pos, bigEndian: big))
+            out.append(d.float64(at: pos + 8, bigEndian: big))
+            pos += step
+        }
+        out
+    }
+
+    /// Reads one geometry, whatever its kind and byte order, and those
+    /// inside it. Z and M are passed over. Points that aren't numbers
+    /// (how an empty point is written) are left out. The arcs of curves
+    /// are read as straight lines through the points they are given by.
+    fn geometry(depth: Int) {
+        if failed || depth > 32 || pos + 5 > end || d[pos] > 1 {
+            failed = true
+            return
+        }
+        let big = d[pos] == 0
+        var type = d.uint32(at: pos + 1, bigEndian: big)
+        pos += 5
+        // PostGIS's way of saying Z, M and "a CRS number follows": high bits.
+        var extra = 0
+        if type >= 2147483648 {
+            type -= 2147483648
+            extra += 1
+        }
+        if type >= 1073741824 {
+            type -= 1073741824
+            extra += 1
+        }
+        if type >= 536870912 {
+            type -= 536870912
+            pos += 4
+        }
+        // The standard's way: 1000 for Z, 2000 for M, 3000 for both.
+        let family = type / 1000
+        if family == 1 || family == 2 {
+            extra += 1
+        } else if family == 3 {
+            extra += 2
+        } else if family != 0 {
+            failed = true
+            return
+        }
+        let base = type % 1000
+        let step = 16 + 8 * min(extra, 2)
+        if base == 1 {
+            if pos + step > end {
+                failed = true
+                return
+            }
+            let x = d.float64(at: pos, bigEndian: big)
+            let y = d.float64(at: pos + 8, bigEndian: big)
+            pos += step
+            if x.isFinite && y.isFinite {
+                shape.addPoints([x, y])
+            }
+            return
+        }
+        if base == 2 || base == 8 {
+            let line = coords(big: big, step: step)
+            if line.count >= 4 {
+                shape.addLine(line)
+            }
+            return
+        }
+        if pos + 4 > end {
+            failed = true
+            return
+        }
+        let count = d.uint32(at: pos, bigEndian: big)
+        pos += 4
+        if count > end - pos {
+            failed = true
+            return
+        }
+        if base == 3 || base == 17 {
+            var rings: [[Float]] = []
+            for _ in 0..count {
+                let ring = coords(big: big, step: step)
+                if ring.count >= 6 {
+                    rings.append(ring)
+                }
+            }
+            shape.addPolygon(rings)
+            return
+        }
+        if base == 9 || base == 10 {
+            // A curve made of pieces (9), or a polygon whose rings are
+            // curves (10): the lines inside become one line, or the rings.
+            let first = shape.first
+            let before = shape.lines.count
+            for _ in 0..count {
+                geometry(depth: depth + 1)
+            }
+            if failed {
+                return
+            }
+            let pieces = shape.lines.slice(from: before, to: shape.lines.count)
+            shape.lines = shape.lines.slice(from: 0, to: before)
+            shape.first = first
+            if base == 10 {
+                shape.addPolygon(pieces)
+                return
+            }
+            var joined: [Float] = []
+            for piece in pieces {
+                var i = 0
+                let n = joined.count
+                if n >= 2 && piece[0] == joined[n - 2] && piece[1] == joined[n - 1] {
+                    i = 2
+                }
+                while i < piece.count {
+                    joined.append(piece[i])
+                    i += 1
+                }
+            }
+            if joined.count >= 4 {
+                shape.addLine(joined)
+            }
+            return
+        }
+        if (base >= 4 && base <= 7) || base == 11 || base == 12 || base == 15 || base == 16 {
+            for _ in 0..count {
+                geometry(depth: depth + 1)
+                if failed {
+                    return
+                }
+            }
+            return
+        }
+        failed = true
+    }
+}
+
+/// The shape written as WKB (or PostGIS's EWKB). A geometry collection
+/// gives its members of the kind of its first one; an empty one, an empty
+/// geometry of the kind it says.
+public fn geometryFromWkb(_ data: Data) -> Result<Geometry> {
+    var reader = FmtWkbReader(d: data, pos: 0, end: data.count)
+    reader.geometry(depth: 0)
+    if reader.failed {
+        return .failure(error: Error("these bytes aren't WKB (or they are cut short)"))
+    }
+    if reader.pos != data.count {
+        return .failure(error: Error("there are bytes after the WKB's shape"))
+    }
+    let shape = reader.shape
+    if shape.first >= 0 {
+        return .ok(value: shape.geometry(shape.first))
+    }
+    Result.ok(value: emptyGeometry(fmtKind(max(shape.hint, 0))))
+}
+
+/// Coordinates as WKB's numbers: 8 bytes each, the low byte first.
+fn fmtWkbFloats(_ coords: [Float], count: Int) -> Data {
+    if coords.count == count {
+        return Data(float64s: coords)
+    }
+    Data(float64s: coords.prefix(count))
+}
+
+/// A count as WKB writes it: 4 bytes, the low byte first.
+fn fmtWkbCount(_ n: Int) -> Data {
+    Data(bytes: n.bytes(count: 4))
+}
+
+/// The head of a geometry in WKB: the byte order (1, low byte first) and
+/// the type.
+fn fmtWkbType(_ type: Int) -> Data {
+    Data(bytes: [1, type, 0, 0, 0])
+}
+
+/// The shape as 2D WKB (the low byte first). `multi` writes every shape as
+/// a MULTI… one, even of one member (a layer of shapes some of which have
+/// several parts keeps them all one type); without it, a shape of one
+/// member is written as a POINT, LINESTRING or POLYGON. An empty shape is
+/// an empty geometry of its kind (a point of NaN for a point, as GDAL
+/// writes it).
+public fn wkb(_ g: Geometry, multi: Bool = false) -> Data {
+    var out = Data()
+    let many = multi || g.memberCount() > 1
+    match g.kind {
+        .point -> {
+            var coords: [Float] = []
+            for part in g.parts {
+                coords += part
+            }
+            let n = coords.count / 2
+            if many {
+                out += fmtWkbType(4)
+                out += fmtWkbCount(n)
+                for k in 0..n {
+                    out += fmtWkbType(1)
+                    out += Data(float64s: [coords[2 * k], coords[2 * k + 1]])
+                }
+            } else {
+                out += fmtWkbType(1)
+                out += if n == 0 { Data(float64s: [0.0 / 0.0, 0.0 / 0.0]) } else { fmtWkbFloats(coords, count: 2) }
+            }
+        }
+        .line -> {
+            if many {
+                out += fmtWkbType(5)
+                out += fmtWkbCount(g.parts.count)
+            }
+            if !many && g.parts.isEmpty {
+                out += fmtWkbType(2)
+                out += fmtWkbCount(0)
+            }
+            for part in g.parts {
+                out += fmtWkbType(2)
+                out += fmtWkbCount(part.count / 2)
+                out += fmtWkbFloats(part, count: part.count / 2 * 2)
+            }
+        }
+        .polygon -> {
+            if many {
+                out += fmtWkbType(6)
+                out += fmtWkbCount(g.polygons.count)
+            }
+            if !many && g.polygons.isEmpty {
+                out += fmtWkbType(3)
+                out += fmtWkbCount(0)
+            }
+            for member in 0..g.polygons.count {
+                let rings = g.rings(of: member)
+                out += fmtWkbType(3)
+                out += fmtWkbCount(rings.count)
+                for ring in rings {
+                    out += fmtWkbCount(ring.count / 2)
+                    out += fmtWkbFloats(ring, count: ring.count / 2 * 2)
+                }
+            }
+        }
+    }
+    out
+}

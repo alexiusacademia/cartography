@@ -1,0 +1,826 @@
+// cartography: shapefiles, the shapes in `.shp` (with their index in
+// `.shx`), the attributes in `.dbf` (a dBase III table), the CRS in `.prj`
+// and the encoding of the text in `.cpg`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+// ----- reading the .shp -----
+
+/// The kind of shape a shape type is (0 point, 1 line, 2 polygon), -1 for
+/// the Null shape and anything unknown. Types with Z or M count as their
+/// plain ones.
+fn fmtShpKindOf(_ type: Int) -> Int {
+    if type == 1 || type == 11 || type == 21 || type == 8 || type == 18 || type == 28 {
+        return 0
+    }
+    if type == 3 || type == 13 || type == 23 {
+        return 1
+    }
+    if type == 5 || type == 15 || type == 25 {
+        return 2
+    }
+    -1
+}
+
+/// Do any of the first points of `hole` lie inside `outer`?
+fn fmtShpInside(_ outer: [Float], _ hole: [Float]) -> Bool {
+    var i = 0
+    while i + 1 < hole.count && i < 6 {
+        if ringContains(outer, hole[i], hole[i + 1]) {
+            return true
+        }
+        i += 2
+    }
+    false
+}
+
+/// For each ring, the ring it's a hole of, -1 for an outer ring, or -2 for
+/// a hole that no outer ring contains. Outer rings are the ones with an
+/// area of the sign of `outerSign` (or none).
+fn fmtShpOwners(_ rings: [[Float]], _ areas: [Float], _ boxes: [Box], outerSign: Float) -> [Int] {
+    var owners: [Int] = []
+    for h in 0..rings.count {
+        if areas[h] * outerSign >= 0.0 {
+            owners.append(-1)
+            continue
+        }
+        var best = -2
+        var bestArea = 0.0
+        let hole = rings[h]
+        for o in 0..rings.count {
+            if areas[o] * outerSign < 0.0 || hole.count < 2 {
+                continue
+            }
+            let size = abs(areas[o])
+            if best >= 0 && size >= bestArea {
+                continue
+            }
+            if boxes[o].contains(hole[0], hole[1]) && fmtShpInside(rings[o], hole) {
+                best = o
+                bestArea = size
+            }
+        }
+        owners.append(best)
+    }
+    owners
+}
+
+/// A polygon feature from the rings of a record. In a shapefile outer
+/// rings run clockwise and holes counterclockwise; each hole goes with the
+/// smallest outer ring around it. When every ring runs the same way, each
+/// is a polygon of its own. Files that have it backwards are understood too.
+fn fmtShpPolygon(_ rings: [[Float]]) -> Geometry {
+    if rings.count <= 1 {
+        return makeGeometry(kind: .polygon, parts: rings, polygons: if rings.isEmpty { [] } else { [0] })
+    }
+    var areas: [Float] = []
+    var clockwise = 0
+    var counter = 0
+    for r in rings {
+        let a = ringArea2(r)
+        areas.append(a)
+        if a < 0.0 {
+            clockwise += 1
+        } else if a > 0.0 {
+            counter += 1
+        }
+    }
+    if clockwise == 0 || counter == 0 {
+        var starts: [Int] = []
+        for i in 0..rings.count {
+            starts.append(i)
+        }
+        return makeGeometry(kind: .polygon, parts: rings, polygons: starts)
+    }
+    var boxes: [Box] = []
+    for r in rings {
+        var b = Box()
+        var i = 0
+        while i + 1 < r.count {
+            b.add(r[i], r[i + 1])
+            i += 2
+        }
+        boxes.append(b)
+    }
+    var owners = fmtShpOwners(rings, areas, boxes, outerSign: -1.0)
+    if owners.contains(-2) {
+        // Holes outside every outer ring: perhaps the file has its rings
+        // the other way around.
+        let flipped = fmtShpOwners(rings, areas, boxes, outerSign: 1.0)
+        if !flipped.contains(-2) {
+            owners = flipped
+        }
+    }
+    var parts: [[Float]] = []
+    var starts: [Int] = []
+    for o in 0..rings.count {
+        if owners[o] >= 0 {
+            continue
+        }
+        starts.append(parts.count)
+        parts.append(rings[o])
+        if owners[o] == -1 {
+            for h in 0..rings.count {
+                if owners[h] == o {
+                    parts.append(rings[h])
+                }
+            }
+        }
+    }
+    makeGeometry(kind: .polygon, parts: parts, polygons: starts)
+}
+
+/// The geometry of the record whose content is the `length` bytes at `at`,
+/// for a layer of the kind `kind`. A Null shape, a shape of another kind or
+/// a damaged record gives an empty geometry.
+fn fmtShpGeometry(_ d: Data, at: Int, length: Int, kind: Int) -> Geometry {
+    let none = emptyGeometry(fmtKind(kind))
+    let type = d.int32(at: at)
+    if fmtShpKindOf(type) != kind {
+        return none
+    }
+    if type == 1 || type == 11 || type == 21 {
+        if length < 20 {
+            return none
+        }
+        let x = d.float64(at: at + 4)
+        let y = d.float64(at: at + 12)
+        // Numbers below -10^38 mean "no data".
+        if !x.isFinite || !y.isFinite || x < -100000000000000000000000000000000000000.0 {
+            return none
+        }
+        return pointGeometry(x, y)
+    }
+    if kind == 0 {
+        if length < 40 {
+            return none
+        }
+        let count = d.int32(at: at + 36)
+        if count <= 0 || 40 + 16 * count > length {
+            return none
+        }
+        var coords: [Float] = []
+        var p = at + 40
+        for _ in 0..count {
+            coords.append(d.float64(at: p))
+            coords.append(d.float64(at: p + 8))
+            p += 16
+        }
+        return makeGeometry(kind: .point, parts: [coords])
+    }
+    if length < 44 {
+        return none
+    }
+    let partCount = d.int32(at: at + 36)
+    let pointCount = d.int32(at: at + 40)
+    if partCount <= 0 || pointCount <= 0 || partCount > length || pointCount > length ||
+        44 + 4 * partCount + 16 * pointCount > length {
+        return none
+    }
+    let base = at + 44 + 4 * partCount
+    var parts: [[Float]] = []
+    for i in 0..partCount {
+        let from = d.int32(at: at + 44 + 4 * i)
+        let to = if i + 1 < partCount { d.int32(at: at + 48 + 4 * i) } else { pointCount }
+        if from < 0 || to > pointCount || from >= to {
+            continue
+        }
+        var coords: [Float] = []
+        var p = base + 16 * from
+        for _ in from..to {
+            coords.append(d.float64(at: p))
+            coords.append(d.float64(at: p + 8))
+            p += 16
+        }
+        parts.append(coords)
+    }
+    if parts.isEmpty {
+        return none
+    }
+    if kind == 1 {
+        return makeGeometry(kind: .line, parts: parts)
+    }
+    fmtShpPolygon(parts)
+}
+
+struct FmtShpShapes {
+    kind: Int = 0
+    geoms: [Geometry] = []
+}
+
+/// Every record of a `.shp`, in order. The records are walked one after
+/// the other, so the `.shx` isn't needed.
+fn fmtShpRead(_ d: Data) -> Result<FmtShpShapes> {
+    if d.count < 100 || d.int32(at: 0, bigEndian: true) != 9994 {
+        return .failure(error: Error("it isn't a shapefile (it doesn't start as one does)"))
+    }
+    let fileType = d.int32(at: 32)
+    if fileType == 31 {
+        return .failure(error: Error("it holds MultiPatch shapes, which cartography doesn't read"))
+    }
+    var kind = fmtShpKindOf(fileType)
+    let n = d.count
+    if kind < 0 {
+        // The header doesn't say: the first shape that isn't Null does.
+        var pos = 100
+        while pos + 12 <= n && kind < 0 {
+            let length = d.int32(at: pos + 4, bigEndian: true) * 2
+            if length < 4 {
+                break
+            }
+            kind = fmtShpKindOf(d.int32(at: pos + 8))
+            pos += 8 + length
+        }
+        if kind < 0 {
+            kind = 0
+        }
+    }
+    var geoms: [Geometry] = []
+    var pos = 100
+    while pos + 12 <= n {
+        var length = d.int32(at: pos + 4, bigEndian: true) * 2
+        if length < 4 {
+            break
+        }
+        if pos + 8 + length > n {
+            // The last record is cut short: take what's there.
+            length = n - pos - 8
+        }
+        geoms.append(fmtShpGeometry(d, at: pos + 8, length: length, kind: kind))
+        pos += 8 + length
+    }
+    Result.ok(value: FmtShpShapes(kind: kind, geoms: geoms))
+}
+
+// ----- reading the .dbf -----
+
+struct FmtDbfField {
+    name: String
+    /// The letter of its type, as a byte: C, N, F, L, D, …
+    type: Int = 67
+    /// Where it starts in a record.
+    offset: Int = 0
+    width: Int = 0
+    decimals: Int = 0
+}
+
+struct FmtDbfTable {
+    columns: [Column] = []
+    /// For each record, whether it's marked as deleted.
+    deleted: [Bool] = []
+}
+
+/// The table in a `.dbf`. Text is read as UTF-8 when it is UTF-8, as
+/// Latin-1 otherwise (or always, with `latin1`).
+fn fmtDbfRead(_ d: Data, latin1: Bool) -> Result<FmtDbfTable> {
+    if d.count < 32 {
+        return .failure(error: Error("its .dbf is too short to be a table"))
+    }
+    let records = d.uint32(at: 4)
+    let headerLength = d.uint16(at: 8)
+    let recordLength = d.uint16(at: 10)
+    var fields: [FmtDbfField] = []
+    var pos = 32
+    var offset = 1
+    while pos + 32 <= d.count && pos + 32 <= headerLength && d[pos] != 13 {
+        let raw = d.slice(from: pos, to: pos + 11)
+        var end = 0
+        while end < 11 && raw[end] != 0 {
+            end += 1
+        }
+        let name = fmtText(raw.slice(from: 0, to: end)).trim()
+        let type = d[pos + 11]
+        var width = d[pos + 16]
+        var decimals = d[pos + 17]
+        if type == 67 && decimals > 0 {
+            // Long text fields keep the rest of their width here.
+            width += decimals * 256
+            decimals = 0
+        }
+        fields.append(FmtDbfField(name: name, type: type, offset: offset, width: width, decimals: decimals))
+        offset += width
+        pos += 32
+    }
+    if recordLength <= 0 || headerLength < 32 {
+        return .failure(error: Error("its .dbf has a damaged header"))
+    }
+    let count = max(0, min(records, (d.count - headerLength) / recordLength))
+    var nums: [[Float]] = []
+    var texts: [[String]] = []
+    var hasPoint: [Bool] = []
+    for _ in fields {
+        nums.append([])
+        texts.append([])
+        hasPoint.append(false)
+    }
+    var deleted: [Bool] = []
+    let none = 0.0 / 0.0
+    for r in 0..count {
+        let base = headerLength + r * recordLength
+        deleted.append(d[base] == 42)
+        for (f, field) in fields.enumerated() {
+            var from = base + field.offset
+            var to = min(from + field.width, base + recordLength)
+            // Values are padded with spaces (and sometimes zeros).
+            while from < to && d[from] == 32 {
+                from += 1
+            }
+            while to > from && (d[to - 1] == 32 || d[to - 1] == 0) {
+                to -= 1
+            }
+            let type = field.type
+            if type == 78 || type == 70 {
+                if from >= to {
+                    nums[f].append(none)
+                    continue
+                }
+                if field.decimals == 0 && !hasPoint[f] {
+                    for i in from..to {
+                        let c = d[i]
+                        if c == 46 || c == 101 || c == 69 {
+                            hasPoint[f] = true
+                        }
+                    }
+                }
+                nums[f].append(fmtFloatAt(d, from, to))
+            } else if from >= to {
+                texts[f].append("")
+            } else if type == 76 {
+                let c = d[from]
+                if c == 84 || c == 116 || c == 89 || c == 121 {
+                    texts[f].append("true")
+                } else if c == 70 || c == 102 || c == 78 || c == 110 {
+                    texts[f].append("false")
+                } else {
+                    texts[f].append("")
+                }
+            } else if type == 68 && to - from == 8 {
+                // Dates are YYYYMMDD.
+                let s = d.slice(from: from, to: to).latin1
+                texts[f].append(s.substring(from: 0, to: 4) + "-" + s.substring(from: 4, to: 6) + "-" + s.substring(from: 6, to: 8))
+            } else {
+                let s = d.slice(from: from, to: to)
+                texts[f].append(if latin1 { s.latin1 } else { s.text ?? s.latin1 })
+            }
+        }
+    }
+    var columns: [Column] = []
+    for (f, field) in fields.enumerated() {
+        if field.type == 78 || field.type == 70 {
+            let whole = field.decimals == 0 && field.width <= 18 && !hasPoint[f]
+            columns.append(Column(name: field.name, kind: if whole { FieldKind.int } else { FieldKind.float }, nums: nums[f]))
+        } else {
+            columns.append(Column(name: field.name, kind: .text, texts: texts[f]))
+        }
+    }
+    Result.ok(value: FmtDbfTable(columns: columns, deleted: deleted))
+}
+
+/// Does a `.cpg` say the text is Latin-1 (or Windows-1252, nearly the same)?
+fn fmtDbfIsLatin1(_ cpg: String) -> Bool {
+    let t = cpg.trim().uppercase().replace("_", with: "-")
+    t.contains("8859-1") && !t.contains("8859-10") && !t.contains("8859-11") && !t.contains("8859-13") &&
+        !t.contains("8859-14") && !t.contains("8859-15") && !t.contains("8859-16") ||
+        t == "LATIN1" || t == "LATIN-1" || t.contains("1252")
+}
+
+/// Reads a shapefile: the `.shp` at `path` (or beside it, when `path` is
+/// its `.dbf`, `.shx` or `.prj`), with the attributes of its `.dbf` and the
+/// CRS of its `.prj` (WGS 84 if there's none or it isn't understood).
+/// Text in the `.dbf` is UTF-8 unless its `.cpg` says Latin-1 (or it isn't
+/// valid UTF-8). Gives one layer. A `.dbf` alone gives a table without
+/// shapes.
+public fn readShapefile(_ path: String) -> Result<Layer> {
+    let shpPath = if path.fileExtension.lowercase() == "shp" { path } else { fmtSibling(path, "shp") ?? "" }
+    let dbfPath = if path.fileExtension.lowercase() == "dbf" { path } else { fmtSibling(path, "dbf") ?? "" }
+    var shapes = FmtShpShapes()
+    if shpPath.isEmpty {
+        if path.fileExtension.lowercase() != "dbf" {
+            return .failure(error: fmtReadError(path, "there's no .shp file beside it"))
+        }
+    } else {
+        let d = try fmtLoad(shpPath)
+        match fmtShpRead(d) {
+            .ok(s) -> { shapes = s }
+            .failure(e) -> { return .failure(error: fmtReadError(shpPath, e.message)) }
+        }
+    }
+    var columns: [Column] = []
+    var deleted: [Bool] = []
+    if !dbfPath.isEmpty && fileExists(dbfPath) {
+        let d = try fmtLoad(dbfPath)
+        var latin1 = false
+        if let cpg = fmtSibling(dbfPath, "cpg") {
+            if let c = readData(cpg) {
+                latin1 = fmtDbfIsLatin1(c.latin1)
+            }
+        }
+        match fmtDbfRead(d, latin1: latin1) {
+            .ok(t) -> {
+                columns = t.columns
+                deleted = t.deleted
+            }
+            .failure(e) -> { return .failure(error: fmtReadError(path, e.message)) }
+        }
+    }
+    var geoms = shapes.geoms
+    if shpPath.isEmpty {
+        for _ in deleted {
+            geoms.append(emptyGeometry(.point))
+        }
+    }
+    // The shapes decide how many features there are: a shorter table is
+    // filled with empty values, a longer one is cut.
+    let n = geoms.count
+    var rows = deleted.count
+    if !columns.isEmpty && rows != n {
+        var keep: [Int] = []
+        for i in 0..min(n, rows) {
+            keep.append(i)
+        }
+        for c in 0..columns.count {
+            if rows > n {
+                columns[c] = columns[c].picking(keep)
+            }
+            while columns[c].count() < n {
+                columns[c].append(Value.null)
+            }
+        }
+        rows = n
+    }
+    // A record marked as deleted takes its shape with it.
+    if deleted.contains(true) {
+        var keep: [Int] = []
+        var kept: [Geometry] = []
+        for i in 0..n {
+            if i < deleted.count && deleted[i] {
+                continue
+            }
+            keep.append(i)
+            kept.append(geoms[i])
+        }
+        geoms = kept
+        columns = columns.map { c in c.picking(keep) }
+    }
+    var crs = lonLat()
+    if let prj = fmtSibling(if shpPath.isEmpty { dbfPath } else { shpPath }, "prj") {
+        if let d = readData(prj) {
+            crs = geodesy.fromWkt(fmtText(d)).value() ?? crs
+        }
+    }
+    let source = if shpPath.isEmpty { dbfPath } else { shpPath }
+    let kind = fmtKind(shapes.kind)
+    Result.ok(value: Layer(name: fmtBaseName(source), source: source, crs: crs, geomKind: kind, geoms: geoms,
+                           columns: columns, style: Style(symbol: defaultSymbol(kind, seed: 0))))
+}
+
+// ----- writing -----
+
+/// The bytes of text cut to at most `limit` bytes, never in the middle of
+/// a character.
+fn fmtDbfCut(_ text: String, _ limit: Int) -> Data {
+    let d = Data(text: text)
+    if d.count <= limit {
+        return d
+    }
+    var cut = limit
+    while cut > 0 && d[cut] >= 128 && d[cut] < 192 {
+        cut -= 1
+    }
+    d.slice(from: 0, to: cut)
+}
+
+/// Names for the fields of a `.dbf`: at most 10 bytes each, and no two
+/// the same (whatever their capitals).
+fn fmtDbfFieldNames(_ names: [String]) -> [String] {
+    var used = Set<String>()
+    var out: [String] = []
+    for name in names {
+        var base = fmtDbfCut(name.trim(), 10).text ?? ""
+        if base.isEmpty {
+            base = "FIELD"
+        }
+        var candidate = base
+        var k = 1
+        while used.contains(candidate.uppercase()) {
+            let suffix = "_{k}"
+            candidate = (fmtDbfCut(base, 10 - suffix.count).text ?? "") + suffix
+            k += 1
+        }
+        used.insert(candidate.uppercase())
+        out.append(candidate)
+    }
+    out
+}
+
+/// A number as "1.2345e25", for numbers too long to write out, with every
+/// digit it has.
+fn fmtDbfScientific(_ x: Float) -> String {
+    if x == 0.0 {
+        return "0.0"
+    }
+    // "{x}" never uses an exponent: take its digits and count the places.
+    let d = Data(text: "{abs(x)}")
+    var digits: [Int] = []
+    var whole = d.count
+    for i in 0..d.count {
+        if d[i] == 46 {
+            whole = i
+        } else {
+            digits.append(d[i])
+        }
+    }
+    var first = 0
+    while first < digits.count - 1 && digits[first] == 48 {
+        first += 1
+    }
+    var last = digits.count
+    while last > first + 1 && digits[last - 1] == 48 {
+        last -= 1
+    }
+    var out: [Int] = if x < 0.0 { [45] } else { [] }
+    out.append(digits[first])
+    out.append(46)
+    if last > first + 1 {
+        out.appendAll(digits.slice(from: first + 1, to: last))
+    } else {
+        out.append(48)
+    }
+    (Data(bytes: out).text ?? "0.0") + "e{whole - 1 - first}"
+}
+
+/// One field of a `.dbf` being written: its values as they go in the file.
+struct FmtDbfOut {
+    name: String
+    type: Int = 67
+    width: Int = 1
+    decimals: Int = 0
+    numeric: Bool = false
+    values: [Data] = []
+}
+
+/// How a column is written in a `.dbf`: whole numbers as N with the width
+/// of the longest, other numbers as N with as many decimals as they need
+/// to read back the same (as F with exponents when that's too wide), text
+/// as C as wide as the longest value (254 bytes at most).
+fn fmtDbfColumn(_ col: Column, name: String) -> FmtDbfOut {
+    var out = FmtDbfOut(name: name)
+    var width = 1
+    if col.kind == .text {
+        for s in col.texts {
+            let d = fmtDbfCut(s, 254)
+            width = max(width, d.count)
+            out.values.append(d)
+        }
+        out.width = width
+        return out
+    }
+    out.type = 78
+    out.numeric = true
+    if col.kind == .int {
+        for x in col.nums {
+            let d = Data(text: if x.isFinite { fmtShort(round(x)) } else { "" })
+            width = max(width, d.count)
+            out.values.append(d)
+        }
+        out.width = width
+        return out
+    }
+    // Every value with all the digits it has, then zeros after them so
+    // that they all have as many decimals.
+    var texts: [String] = []
+    var decimals = 1
+    var before = 1
+    for x in col.nums {
+        if !x.isFinite {
+            texts.append("")
+            continue
+        }
+        var text = "{x}"
+        var point = text.find(".") ?? -1
+        if point < 0 {
+            point = text.count
+            text += ".0"
+        }
+        decimals = max(decimals, text.count - point - 1)
+        before = max(before, point)
+        texts.append(text)
+    }
+    if before + 1 + decimals > 32 {
+        // Too wide to write out: with exponents, as F fields may be.
+        out.type = 70
+        for (i, text) in texts.enumerated() {
+            let d = Data(text: if text.isEmpty { "" } else { fmtDbfScientific(col.nums[i]) })
+            width = max(width, d.count)
+            out.values.append(d)
+        }
+        out.width = width
+        out.decimals = (width - 7).clamped(min: 1, max: 15)
+        return out
+    }
+    for text in texts {
+        if text.isEmpty {
+            out.values.append(Data())
+            continue
+        }
+        let point = text.find(".") ?? 0
+        let d = Data(text: text + "0".repeated(decimals - (text.count - point - 1)))
+        width = max(width, d.count)
+        out.values.append(d)
+    }
+    out.width = width
+    out.decimals = decimals
+    out
+}
+
+/// The bytes of a `.dbf` with the layer's attributes. A layer without
+/// columns gets a field FID, since a table needs one.
+fn fmtDbfBytes(_ layer: Layer) -> [Int] {
+    let rows = layer.geoms.count
+    var fields: [FmtDbfOut] = []
+    let names = fmtDbfFieldNames(layer.columns.map { c in c.name })
+    for (i, col) in layer.columns.enumerated() {
+        fields.append(fmtDbfColumn(col, name: names[i]))
+    }
+    if fields.isEmpty {
+        var fid = FmtDbfOut(name: "FID", type: 78, numeric: true)
+        for i in 0..rows {
+            fid.values.append(Data(text: "{i}"))
+        }
+        fid.width = max(1, "{rows}".count)
+        fields.append(fid)
+    }
+    var recordLength = 1
+    for f in fields {
+        recordLength += f.width
+    }
+    let headerLength = 32 + 32 * fields.count + 1
+    let today = dateParts(now())
+    var out: [Int] = [3, today.year - 1900, today.month, today.day]
+    out.appendAll(rows.bytes(count: 4))
+    out.appendAll(headerLength.bytes(count: 2))
+    out.appendAll(recordLength.bytes(count: 2))
+    for _ in 0..20 {
+        out.append(0)
+    }
+    for f in fields {
+        let name = Data(text: f.name)
+        for i in 0..11 {
+            out.append(if i < name.count && i < 10 { name[i] } else { 0 })
+        }
+        out.append(f.type)
+        out.appendAll([0, 0, 0, 0, f.width, f.decimals])
+        for _ in 0..14 {
+            out.append(0)
+        }
+    }
+    out.append(13)
+    for r in 0..rows {
+        out.append(32)
+        for f in fields {
+            let v = f.values[r]
+            let padding = f.width - v.count
+            if f.numeric {
+                for _ in 0..padding {
+                    out.append(32)
+                }
+            }
+            for i in 0..v.count {
+                out.append(v[i])
+            }
+            if !f.numeric {
+                for _ in 0..padding {
+                    out.append(32)
+                }
+            }
+        }
+    }
+    out.append(26)
+    out
+}
+
+/// The 100 bytes that start a `.shp` and a `.shx`.
+fn fmtShpHeader(fileBytes: Int, type: Int, box: Box) -> [Int] {
+    var out: [Int] = (9994).bytes(count: 4, bigEndian: true)
+    for _ in 0..20 {
+        out.append(0)
+    }
+    out.appendAll((fileBytes / 2).bytes(count: 4, bigEndian: true))
+    out.appendAll((1000).bytes(count: 4))
+    out.appendAll(type.bytes(count: 4))
+    out.appendAll(box.minX.bytes())
+    out.appendAll(box.minY.bytes())
+    out.appendAll(box.maxX.bytes())
+    out.appendAll(box.maxY.bytes())
+    for _ in 0..32 {
+        out.append(0)
+    }
+    out
+}
+
+/// The content of a record: the shape type, then the shape. An empty
+/// geometry is a Null shape.
+fn fmtShpRecord(_ g: Geometry, type: Int) -> [Int] {
+    if g.isEmpty() {
+        return [0, 0, 0, 0]
+    }
+    var out: [Int] = type.bytes(count: 4)
+    if type == 1 {
+        out.appendAll(g.parts[0][0].bytes())
+        out.appendAll(g.parts[0][1].bytes())
+        return out
+    }
+    out.appendAll(g.box.minX.bytes())
+    out.appendAll(g.box.minY.bytes())
+    out.appendAll(g.box.maxX.bytes())
+    out.appendAll(g.box.maxY.bytes())
+    var parts = g.parts
+    if type == 5 {
+        // Outer rings clockwise, holes counterclockwise.
+        var outer = Set<Int>()
+        for s in g.polygons {
+            outer.insert(s)
+        }
+        for i in 0..parts.count {
+            parts[i] = fmtOriented(parts[i], counterclockwise: !outer.contains(i))
+        }
+    }
+    var points = 0
+    for p in parts {
+        points += p.count / 2
+    }
+    if type != 8 {
+        out.appendAll(parts.count.bytes(count: 4))
+    }
+    out.appendAll(points.bytes(count: 4))
+    if type != 8 {
+        var start = 0
+        for p in parts {
+            out.appendAll(start.bytes(count: 4))
+            start += p.count / 2
+        }
+    }
+    for p in parts {
+        var i = 0
+        while i + 1 < p.count {
+            out.appendAll(p[i].bytes())
+            out.appendAll(p[i + 1].bytes())
+            i += 2
+        }
+    }
+    out
+}
+
+/// Writes the layer as a shapefile: `.shp`, `.shx`, `.dbf`, `.prj` and
+/// `.cpg` files named like `path`. Points are written as Point shapes (as
+/// MultiPoint if a feature has several), lines as PolyLine, polygons as
+/// Polygon, features without a shape as Null shapes.
+public fn writeShapefile(_ layer: Layer, _ path: String) -> Error? {
+    let shpPath = if path.fileExtension.lowercase() == "shp" { path } else { fmtWithExtension(path, "shp") }
+    var type = 1
+    match layer.geomKind {
+        .point -> {
+            if layer.geoms.any(where: { g in g.pointCount() > 1 }) {
+                type = 8
+            }
+        }
+        .line -> { type = 3 }
+        .polygon -> { type = 5 }
+    }
+    var records: [Int] = []
+    var index: [Int] = []
+    var box = Box()
+    for (i, g) in layer.geoms.enumerated() {
+        let fits = g.kind == layer.geomKind
+        let content = fmtShpRecord(if fits { g } else { emptyGeometry(layer.geomKind) }, type: type)
+        if fits {
+            box.include(g.box)
+        }
+        index.appendAll(((100 + records.count) / 2).bytes(count: 4, bigEndian: true))
+        index.appendAll((content.count / 2).bytes(count: 4, bigEndian: true))
+        records.appendAll((i + 1).bytes(count: 4, bigEndian: true))
+        records.appendAll((content.count / 2).bytes(count: 4, bigEndian: true))
+        records.appendAll(content)
+    }
+    var shp = fmtShpHeader(fileBytes: 100 + records.count, type: type, box: box)
+    shp.appendAll(records)
+    var shx = fmtShpHeader(fileBytes: 100 + index.count, type: type, box: box)
+    shx.appendAll(index)
+    if !writeData(path: shpPath, data: Data(bytes: shp)) {
+        return fmtWriteError(shpPath, "the file can't be written there")
+    }
+    let shxPath = fmtWithExtension(shpPath, "shx")
+    if !writeData(path: shxPath, data: Data(bytes: shx)) {
+        return fmtWriteError(shxPath, "the file can't be written there")
+    }
+    let dbfPath = fmtWithExtension(shpPath, "dbf")
+    if !writeData(path: dbfPath, data: Data(bytes: fmtDbfBytes(layer))) {
+        return fmtWriteError(dbfPath, "the file can't be written there")
+    }
+    try fmtSave(fmtWithExtension(shpPath, "prj"), layer.crs.wkt())
+    try fmtSave(fmtWithExtension(shpPath, "cpg"), "UTF-8")
+    nil
+}

@@ -1,0 +1,6 @@
+WKT,id,name,value,count
+"POINT (121.0 14.6)",1,Manila,1.5,10
+"POINT (-73.98543 40.758896)",2,"Times Square, NYC",-2.25,20
+"POINT (2.2945 48.8584)",3,"Tour Eiffel ""Zoë""",1e-07,30
+"POINT (151.2153 -33.8568)",4,Sydney Opera,123456.789,40
+"POINT (0 0)",5,Null Island,,50

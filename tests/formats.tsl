@@ -1,0 +1,826 @@
+// Tests of cartography's file formats. The files in data/formats were
+// written by GDAL (tools/oracle/formats_fixtures.py), which also wrote
+// what it reads from each into expected.json: these tests read the files
+// with cartography and compare. Round trips write every format and read
+// it back; damaged and odd input must give an error, never a crash.
+// tools/oracle/formats_check_written.py has GDAL read the files
+// cartography writes (from the test "files are written for the oracle").
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import ".." as cartography
+import geodesy
+
+/// What GDAL read from one layer of a fixture.
+struct FmtTExpected {
+    file: String
+    layer: String
+    kind: String
+    epsg: Int
+    count: Int
+    fields: [String]
+    kinds: [String]
+    rows: [[String?]]
+    wkts: [String]
+}
+
+/// The folder of the fixtures, whether the tests run from the library's
+/// folder or from tests/.
+fn fmtTFolder() -> String {
+    if fileExists("tests/data/formats/expected.json") {
+        return "tests/data/formats"
+    }
+    "data/formats"
+}
+
+/// Fails the test if writing gave an error.
+fn fmtTOk(_ e: Error?, _ what: String = "") {
+    if let err = e {
+        fail("{what}: {err.message}")
+    }
+}
+
+fn fmtTPath(_ file: String) -> String {
+    joinPath(fmtTFolder(), file)
+}
+
+/// A new, empty folder for files written by a test.
+fn fmtTOut(_ name: String) -> String {
+    let folder = joinPath(tempFolder(), "cartography-formats-" + name + "-{Int(now() * 1000.0) % 100000000}")
+    createFolder(folder)
+    folder
+}
+
+fn fmtTExpectations() -> [FmtTExpected] {
+    let text = readFile(fmtTPath("expected.json")) ?? "[]"
+    let r: Result<[FmtTExpected]> = decodeJson(text)
+    r.valueOr([])
+}
+
+fn fmtTKindName(_ k: cartography.GeomKind) -> String {
+    match k {
+        .point -> "point"
+        .line -> "line"
+        .polygon -> "polygon"
+    }
+}
+
+/// Are two numbers the same, but for the last bits?
+fn fmtTClose(_ a: Float, _ b: Float, _ tolerance: Float = 1e-9) -> Bool {
+    if a.isNaN || b.isNaN {
+        return a.isNaN && b.isNaN
+    }
+    abs(a - b) <= tolerance * max(1.0, max(abs(a), abs(b)))
+}
+
+/// A ring told apart from the others whatever its direction and first
+/// point: its area, its points and the corner of its box.
+fn fmtTRingSign(_ ring: [Float]) -> [Float] {
+    var minX = 1.0 / 0.0
+    var minY = 1.0 / 0.0
+    var i = 0
+    while i + 1 < ring.count {
+        minX = min(minX, ring[i])
+        minY = min(minY, ring[i + 1])
+        i += 2
+    }
+    [abs(cartography.ringArea2(ring)), Float(ring.count), minX, minY]
+}
+
+/// Do two shapes have the same points (polygons: the same rings, whatever
+/// their direction and order)? Says what differs, or "".
+fn fmtTShapeDiff(_ a: cartography.Geometry, _ b: cartography.Geometry, tolerance: Float = 1e-9) -> String {
+    if a.isEmpty() || b.isEmpty() {
+        return if a.isEmpty() == b.isEmpty() { "" } else { "one is empty" }
+    }
+    if a.kind != b.kind {
+        return "kinds {fmtTKindName(a.kind)} and {fmtTKindName(b.kind)}"
+    }
+    if a.kind == .polygon {
+        if a.polygons.count != b.polygons.count || a.parts.count != b.parts.count {
+            return "{a.polygons.count} polygons of {a.parts.count} rings, and {b.polygons.count} of {b.parts.count}"
+        }
+        var signs = b.parts.map { r in fmtTRingSign(r) }
+        for r in a.parts {
+            let s = fmtTRingSign(r)
+            var found = -1
+            for (k, t) in signs.enumerated() {
+                if fmtTClose(s[0], t[0], tolerance) && s[1] == t[1] && fmtTClose(s[2], t[2], tolerance) && fmtTClose(s[3], t[3], tolerance) {
+                    found = k
+                    break
+                }
+            }
+            if found < 0 {
+                return "a ring of {Int(s[1]) / 2} points at {s[2]}, {s[3]} isn't in the other"
+            }
+            signs.remove(at: found)
+        }
+        return ""
+    }
+    if a.parts.count != b.parts.count && a.kind == .line {
+        return "{a.parts.count} lines and {b.parts.count}"
+    }
+    var pa: [Float] = []
+    var pb: [Float] = []
+    for p in a.parts {
+        pa += p
+    }
+    for p in b.parts {
+        pb += p
+    }
+    if pa.count != pb.count {
+        return "{pa.count / 2} points and {pb.count / 2}"
+    }
+    for i in 0..pa.count {
+        if !fmtTClose(pa[i], pb[i], tolerance) {
+            return "coordinate {i}: {pa[i]} and {pb[i]}"
+        }
+    }
+    ""
+}
+
+/// The layer of a file that GDAL's layer `e` is.
+fn fmtTFind(_ layers: [cartography.Layer], _ e: FmtTExpected) -> cartography.Layer? {
+    if layers.count == 1 {
+        return layers[0]
+    }
+    for l in layers {
+        if l.name == e.layer || l.name.hasSuffix("(" + e.layer + ")") {
+            return l
+        }
+    }
+    for l in layers {
+        if fmtTKindName(l.geomKind) == e.kind {
+            return l
+        }
+    }
+    nil
+}
+
+/// Compares a layer read by cartography with what GDAL read. Fields
+/// GDAL has that the layer hasn't are left out when they're in `skip`.
+fn fmtTCompare(_ layer: cartography.Layer, _ e: FmtTExpected, skip: [String] = [], tolerance: Float = 0.0) {
+    expect(layer.geoms.count == e.count, "{e.file}: features")
+    expect(fmtTKindName(layer.geomKind) == e.kind, "{e.file}: kind")
+    if e.epsg > 0 {
+        if let c = geodesy.epsg(e.epsg) {
+            expect(cartography.sameCrs(layer.crs, c), "{e.file}: CRS {layer.crs.name} isn't EPSG:{e.epsg}")
+        }
+    }
+    let n = min(layer.geoms.count, e.count)
+    for r in 0..n {
+        let want = if e.wkts[r].isEmpty { cartography.emptyGeometry(layer.geomKind) } else {
+            cartography.geometryFromWkt(e.wkts[r]).valueOr(cartography.emptyGeometry(.point))
+        }
+        let diff = fmtTShapeDiff(layer.geoms[r], want, tolerance: tolerance)
+        expect(diff.isEmpty, "{e.file} row {r}: {diff}")
+    }
+    for (f, name) in e.fields.enumerated() {
+        if skip.contains(name) {
+            continue
+        }
+        if let c = layer.columnIndex(name) {
+            let col = layer.columns[c]
+            for r in 0..n {
+                let want = e.rows[r][f] ?? ""
+                if col.isNumeric() && e.kinds[f] != "text" {
+                    let x = Float(want) ?? (0.0 / 0.0)
+                    expect(fmtTClose(col.number(r), x, 1e-12), "{e.file} {name} row {r}: {col.display(r)}, not {want}")
+                } else if col.isNumeric() {
+                    // GDAL read it as text (CSV): the same number.
+                    let x = Float(want.trim()) ?? (0.0 / 0.0)
+                    expect(fmtTClose(col.number(r), x, 1e-12), "{e.file} {name} row {r}: {col.display(r)}, not {want}")
+                } else {
+                    expect(col.display(r) == want, "{e.file} {name} row {r}: \"{col.display(r)}\", not \"{want}\"")
+                }
+            }
+        } else {
+            fail("{e.file}: no column {name}")
+        }
+    }
+}
+
+/// Reads a fixture with cartography (`readLayers`) and compares it with
+/// what GDAL read from it.
+fn fmtTCheck(_ file: String, layer: String = "", skip: [String] = []) {
+    let all = fmtTExpectations()
+    expect(!all.isEmpty, "expected.json is missing")
+    var found = false
+    for e in all {
+        if e.file != file || (!layer.isEmpty && e.layer != layer) {
+            continue
+        }
+        found = true
+        match cartography.readLayers(fmtTPath(file)) {
+            .ok(layers) -> {
+                if let l = fmtTFind(layers, e) {
+                    expect(l.source == fmtTPath(file))
+                    fmtTCompare(l, e, skip: skip)
+                } else {
+                    fail("{file}: no layer like {e.layer}")
+                }
+            }
+            .failure(err) -> fail("{file}: {err.message}")
+        }
+    }
+    expect(found, "{file} isn't in expected.json")
+}
+
+// ----- GDAL's files, read by cartography -----
+
+test "GeoJSON points written by GDAL" {
+    fmtTCheck("points.geojson")
+}
+
+test "GeoJSON lines written by GDAL" {
+    fmtTCheck("lines.geojson")
+}
+
+test "GeoJSON polygons written by GDAL" {
+    fmtTCheck("polygons.geojson")
+}
+
+test "shapefile points written by GDAL" {
+    fmtTCheck("points.shp")
+}
+
+test "shapefile lines written by GDAL" {
+    fmtTCheck("lines.shp")
+}
+
+test "shapefile polygons written by GDAL" {
+    fmtTCheck("polygons.shp")
+}
+
+test "shapefile in UTM 51N written by GDAL" {
+    fmtTCheck("utm51.shp")
+}
+
+test "Natural Earth countries as a shapefile" {
+    fmtTCheck("countries.shp")
+}
+
+test "GeoPackage points written by GDAL" {
+    fmtTCheck("points.gpkg")
+}
+
+test "GeoPackage lines written by GDAL" {
+    fmtTCheck("lines.gpkg")
+}
+
+test "GeoPackage polygons written by GDAL" {
+    fmtTCheck("polygons.gpkg")
+}
+
+test "GeoPackage in UTM 51N written by GDAL" {
+    fmtTCheck("utm51.gpkg")
+}
+
+test "GeoPackage of three layers written by GDAL" {
+    fmtTCheck("several.gpkg", layer: "cities")
+    fmtTCheck("several.gpkg", layer: "roads")
+    fmtTCheck("several.gpkg", layer: "zones")
+    let layers = cartography.readGeoPackage(fmtTPath("several.gpkg")).valueOr([])
+    expect(layers.map { l in l.name } == ["cities", "roads", "zones"])
+}
+
+test "Natural Earth countries as a GeoPackage" {
+    fmtTCheck("countries.gpkg")
+}
+
+test "KML points" {
+    fmtTCheck("points.kml")
+    // GDAL's KML reader leaves out ExtendedData: these are the values written.
+    let layer = cartography.readLayers(fmtTPath("points.kml")).valueOr([])[0]
+    expect(layer.fieldNames() == ["name", "description", "id", "value", "count"])
+    expect(layer.columns[2].kind == .int && layer.columns[2].nums == [1, 2, 3, 4, 5])
+    expect(layer.columns[3].kind == .float && layer.columns[3].number(3) == 123456.789 && layer.columns[3].isNull(4))
+    expect(layer.columns[3].number(2) == 1e-7)
+    expect(layer.columns[0].display(2) == "Tour Eiffel \"Zoë\"")
+}
+
+test "KML lines" {
+    fmtTCheck("lines.kml")
+}
+
+test "KML polygons" {
+    fmtTCheck("polygons.kml")
+}
+
+test "CSV with points in a WKT column" {
+    fmtTCheck("points_wkt.csv", skip: ["WKT"])
+}
+
+test "CSV with lines in a WKT column" {
+    fmtTCheck("lines_wkt.csv", skip: ["WKT"])
+}
+
+test "CSV with polygons in a WKT column" {
+    fmtTCheck("polygons_wkt.csv", skip: ["WKT"])
+}
+
+test "CSV with longitude and latitude columns" {
+    fmtTCheck("points_xy.csv")
+}
+
+test "GPX waypoints, routes and tracks" {
+    fmtTCheck("trip.gpx", layer: "waypoints")
+    fmtTCheck("trip.gpx", layer: "routes")
+    fmtTCheck("trip.gpx", layer: "tracks")
+    let layers = cartography.readLayers(fmtTPath("trip.gpx")).valueOr([])
+    expect(layers.map { l in l.name } == ["trip (waypoints)", "trip (routes)", "trip (tracks)"])
+}
+
+test "every fixture's layers get a style for their kind" {
+    for e in fmtTExpectations() {
+        for l in cartography.readLayers(fmtTPath(e.file)).valueOr([]) {
+            expect(l.style.symbol == cartography.defaultSymbol(l.geomKind, seed: 0) ||
+                   l.style.symbol == cartography.defaultSymbol(l.geomKind, seed: 1) ||
+                   l.style.symbol == cartography.defaultSymbol(l.geomKind, seed: 2), "{e.file}: style")
+            expect(l.shapes.isEmpty, "{e.file}: not projected")
+        }
+    }
+}
+
+// ----- WKT and WKB, against shapely -----
+
+/// A case of tools/oracle's wkt_cases.json: a text, the parts shapely
+/// reads from it, and its WKB as shapely writes it.
+struct FmtTWktCase {
+    text: String
+    kind: String
+    parts: [[Float]]
+    polygons: [Int]
+    wkb: String
+    wkbBig: String
+    ewkb: String
+}
+
+fn fmtTWktCases() -> [FmtTWktCase] {
+    let r: Result<[FmtTWktCase]> = decodeJson(readFile(fmtTPath("wkt_cases.json")) ?? "[]")
+    r.valueOr([])
+}
+
+/// Bytes from hexadecimal digits.
+fn fmtTHex(_ text: String) -> Data {
+    let digits = "0123456789abcdef"
+    let chars = text.lowercase().characters
+    var out = Data()
+    var i = 0
+    while i + 1 < chars.count {
+        out.append(byte: (digits.find(chars[i]) ?? 0) * 16 + (digits.find(chars[i + 1]) ?? 0))
+        i += 2
+    }
+    out
+}
+
+fn fmtTSameParts(_ g: cartography.Geometry, _ c: FmtTWktCase) {
+    expect(fmtTKindName(g.kind) == c.kind, "{c.text}: kind")
+    expect(g.parts == c.parts, "{c.text}: parts")
+    if g.kind == .polygon {
+        expect(g.polygons == c.polygons, "{c.text}: polygons")
+    }
+}
+
+test "WKT reads as shapely reads it" {
+    let cases = fmtTWktCases()
+    expect(cases.count >= 15)
+    for c in cases {
+        match cartography.geometryFromWkt(c.text) {
+            .ok(g) -> fmtTSameParts(g, c)
+            .failure(e) -> fail("{c.text}: {e.message}")
+        }
+    }
+}
+
+test "WKT written reads back as the same numbers" {
+    for c in fmtTWktCases() {
+        let g = cartography.geometryFromWkt(c.text).valueOr(cartography.emptyGeometry(.point))
+        let again = cartography.geometryFromWkt(cartography.wkt(g)).valueOr(cartography.emptyGeometry(.point))
+        fmtTSameParts(again, c)
+    }
+    let g = cartography.multiPolygonGeometry([[[0, 0, 4, 0, 4, 4, 0, 0]], [[10, 10, 12, 10, 12, 12, 10, 10]]])
+    expect(cartography.wkt(g) == "MULTIPOLYGON (((0 0, 4 0, 4 4, 0 0)), ((10 10, 12 10, 12 12, 10 10)))")
+    expect(cartography.wkt(cartography.pointGeometry(1.0 / 3.0, 2.0), decimals: 3) == "POINT (0.333 2)")
+    expect(cartography.wkt(cartography.emptyGeometry(.line)) == "LINESTRING EMPTY")
+    expect(cartography.wkt(cartography.multiPointGeometry([1, 2, 3, 4])) == "MULTIPOINT ((1 2), (3 4))")
+}
+
+test "WKT with a CRS number, words GEOS doesn't know, and EMPTY" {
+    let p = cartography.geometryFromWkt("SRID=32651;POINT (500000 1600000)").valueOr(cartography.emptyGeometry(.line))
+    expect(p.kind == .point && p.parts == [[500000.0, 1600000.0]])
+    let z = cartography.geometryFromWkt("POINTZ (7 8 9)").valueOr(cartography.emptyGeometry(.line))
+    expect(z.parts == [[7.0, 8.0]])
+    let e = cartography.geometryFromWkt("MULTIPOLYGON EMPTY").valueOr(cartography.pointGeometry(0, 0))
+    expect(e.kind == .polygon && e.isEmpty())
+    let c = cartography.geometryFromWkt("GEOMETRYCOLLECTION (LINESTRING (0 0, 1 1), POINT (5 5), LINESTRING (2 2, 3 3))")
+    expect(c.valueOr(cartography.emptyGeometry(.point)).parts == [[0.0, 0.0, 1.0, 1.0], [2.0, 2.0, 3.0, 3.0]])
+    let layers = cartography.readWKT("SRID=32651;POINT (1 2)\n# a comment\n\nPOINT (3 4)\r\nLINESTRING (0 0, 1 1)\n", name: "w").valueOr([])
+    expect(layers.count == 2)
+    expect(layers[0].name == "w (points)" && layers[0].geoms.count == 2 && layers[0].crs.code == 32651)
+}
+
+test "WKB written is shapely's, byte for byte" {
+    for c in fmtTWktCases() {
+        let g = cartography.geometryFromWkt(c.text).valueOr(cartography.emptyGeometry(.point))
+        expect(cartography.wkb(g).hex == c.wkb.lowercase(), "{c.text}")
+    }
+}
+
+test "WKB, ISO WKB with Z and EWKB read as shapely wrote them" {
+    for c in fmtTWktCases() {
+        for hex in [c.wkb, c.wkbBig, c.ewkb] {
+            match cartography.geometryFromWkb(fmtTHex(hex)) {
+                .ok(g) -> fmtTSameParts(g, c)
+                .failure(e) -> fail("{c.text} {hex}: {e.message}")
+            }
+        }
+    }
+    let multi = cartography.wkb(cartography.lineGeometry([0, 0, 1, 1]), multi: true)
+    let back = cartography.geometryFromWkb(multi).valueOr(cartography.emptyGeometry(.point))
+    expect(multi[1] == 5 && back.parts == [[0.0, 0.0, 1.0, 1.0]])
+}
+
+// ----- round trips -----
+
+/// Layers of each kind with values of every kind, some missing.
+fn fmtTSamples(crs: geodesy.Crs = cartography.lonLat()) -> [cartography.Layer] {
+    let ids: [Float] = [1, 2, 3]
+    let none = 0.0 / 0.0
+    let columns = [
+        cartography.numberColumn(name: "id", values: ids, whole: true),
+        cartography.textColumn(name: "name", values: ["Zoë, \"quoted\"", "", "<&> ñ 東京"]),
+        cartography.numberColumn(name: "value", values: [1.5, none, -1234567.125]),
+        cartography.numberColumn(name: "big", values: [9007199254740991, -42, none], whole: true),
+    ]
+    var points = cartography.Layer(name: "pts", crs: crs, geomKind: .point,
+                                   geoms: [cartography.pointGeometry(121.5, 14.25), cartography.emptyGeometry(.point),
+                                           cartography.pointGeometry(-0.125, 51.5)], columns: columns)
+    points.style.symbol = cartography.defaultSymbol(.point, seed: 0)
+    let lines = cartography.Layer(name: "lns", crs: crs, geomKind: .line,
+                                  geoms: [cartography.lineGeometry([0, 0, 1, 1, 2, 0.5]),
+                                          cartography.multiLineGeometry([[10, 10, 11, 12], [12, 12, 13, 11, 14, 15]]),
+                                          cartography.lineGeometry([-120.5, 35.25, -119.75, 36.125])], columns: columns)
+    let polygons = cartography.Layer(name: "pgs", crs: crs, geomKind: .polygon,
+                                     geoms: [cartography.polygonGeometry([[0, 0, 10, 0, 10, 10, 0, 10, 0, 0], [2, 2, 2, 4, 4, 4, 4, 2, 2, 2]]),
+                                             cartography.multiPolygonGeometry([[[20, 20, 25, 20, 25, 25, 20, 25, 20, 20]],
+                                                                               [[30, 30, 35, 30, 32.5, 35, 30, 30]]]),
+                                             cartography.polygonGeometry([[-5, -5, -1, -5, -3, -1, -5, -5]])], columns: columns)
+    [points, lines, polygons]
+}
+
+/// Compares a layer read back with the one written: shapes (within
+/// `tolerance`, after bringing the written one to `crs`) and the values of
+/// the columns named.
+fn fmtTSameLayer(_ got: cartography.Layer, _ want: cartography.Layer, columns: [String], tolerance: Float = 1e-12,
+                 what: String) {
+    expect(got.geomKind == want.geomKind, "{what}: kind")
+    expect(got.geoms.count == want.geoms.count, "{what}: {got.geoms.count} features, not {want.geoms.count}")
+    for r in 0..min(got.geoms.count, want.geoms.count) {
+        let w = cartography.reprojected(want.geoms[r], from: want.crs, to: got.crs)
+        let diff = fmtTShapeDiff(got.geoms[r], w, tolerance: tolerance)
+        expect(diff.isEmpty, "{what} row {r}: {diff}")
+    }
+    for name in columns {
+        let a = got.columnIndex(name)
+        let b = want.columnIndex(name)
+        if a == nil || b == nil {
+            fail("{what}: no column {name}")
+            continue
+        }
+        let ca = got.columns[a ?? 0]
+        let cb = want.columns[b ?? 0]
+        for r in 0..min(got.geoms.count, want.geoms.count) {
+            if cb.isNumeric() {
+                expect(fmtTClose(ca.number(r), cb.number(r), 1e-15), "{what} {name} row {r}: {ca.display(r)}, not {cb.display(r)}")
+            } else {
+                expect(ca.display(r) == cb.display(r), "{what} {name} row {r}: \"{ca.display(r)}\", not \"{cb.display(r)}\"")
+            }
+        }
+    }
+}
+
+test "GeoJSON round trip" {
+    for l in fmtTSamples() {
+        let back = cartography.readGeoJSON(cartography.geoJSON(l), name: l.name).valueOr([])
+        expect(back.count == 1)
+        if back.count == 1 {
+            fmtTSameLayer(back[0], l, columns: ["id", "name", "value", "big"], tolerance: 1e-7, what: "geojson {l.name}")
+            expect(back[0].columns[0].kind == .int && back[0].columns[2].kind == .float && back[0].columns[1].kind == .text)
+        }
+    }
+}
+
+test "GeoJSON is written in WGS 84" {
+    let utm = geodesy.epsg(32651) ?? cartography.lonLat()
+    for l in fmtTSamples(crs: utm) {
+        var moved = l
+        moved.geoms = l.geoms.map { g in g.mapped({ x, y in (500000.0 + x * 1000.0, 1600000.0 + y * 1000.0) }) }
+        let back = cartography.readGeoJSON(cartography.geoJSON(moved), name: "u").valueOr([])
+        expect(back.count == 1 && cartography.sameCrs(back[0].crs, cartography.lonLat()))
+        if back.count == 1 {
+            fmtTSameLayer(back[0], moved, columns: ["name"], tolerance: 1e-7, what: "geojson utm {l.name}")
+        }
+    }
+}
+
+test "CSV round trip" {
+    for l in fmtTSamples() {
+        let back = cartography.readCSV(cartography.csv(l), name: l.name)
+        match back {
+            .ok(got) -> fmtTSameLayer(got, l, columns: ["id", "name", "value", "big"], what: "csv {l.name}")
+            .failure(e) -> fail("csv {l.name}: {e.message}")
+        }
+    }
+    let info = cartography.inspectCSV("a;lat;lon\n1;2;3\n4;5;6\n")
+    expect(info.delimiter == ";" && info.fields == ["a", "lat", "lon"] && info.xField == "lon" && info.yField == "lat" && info.rows == 2)
+    let given = cartography.readCSV("e,n,v\n500000,1600000,a\n", x: "e", y: "n", crs: geodesy.epsg(32651) ?? cartography.lonLat())
+    expect(given.isOk() && given.valueOr(cartography.Layer()).geoms[0].parts == [[500000.0, 1600000.0]])
+    expect(cartography.readCSV("a,b\n1,2\n", x: "nope", y: "b").error()?.message == "can't read the text: it has no field called nope")
+}
+
+test "KML round trip" {
+    for l in fmtTSamples() {
+        let back = cartography.readKML(cartography.kml(l), name: l.name).valueOr([])
+        expect(back.count == 1)
+        if back.count == 1 {
+            fmtTSameLayer(back[0], l, columns: ["id", "name", "value", "big"], tolerance: 1e-7, what: "kml {l.name}")
+        }
+    }
+}
+
+test "GPX round trip of waypoints and tracks" {
+    let samples = fmtTSamples()
+    let text = cartography.gpx(samples)
+    expect(!text.contains("<rte>") && text.contains("<wpt") && text.contains("<trkseg>"))
+    let back = cartography.readGPX(text, name: "t").valueOr([])
+    expect(back.map { l in l.name } == ["t (waypoints)", "t (tracks)"])
+    if back.count == 2 {
+        // (A waypoint without a place isn't written.)
+        var pts = samples[0]
+        pts.removeFeatures([1])
+        fmtTSameLayer(back[0], pts, columns: ["name"], tolerance: 1e-7, what: "gpx waypoints")
+        fmtTSameLayer(back[1], samples[1], columns: ["name"], tolerance: 1e-7, what: "gpx tracks")
+    }
+    let fixture = cartography.readLayers(fmtTPath("trip.gpx")).valueOr([])
+    let again = cartography.readGPX(cartography.gpx(fixture)).valueOr([])
+    expect(again.count == 3)
+    if again.count == 3 && fixture.count == 3 {
+        for k in 0..3 {
+            fmtTSameLayer(again[k], fixture[k], columns: if k == 0 { ["name", "ele"] } else { ["name", "kind"] },
+                          tolerance: 1e-7, what: "gpx fixture {k}")
+        }
+    }
+}
+
+test "WKT lines round trip" {
+    for l in fmtTSamples() {
+        let back = cartography.readWKT(cartography.wktLines(l), name: l.name).valueOr([])
+        expect(back.count == 1)
+        if back.count == 1 {
+            fmtTSameLayer(back[0], l, columns: [], what: "wkt {l.name}")
+        }
+    }
+}
+
+test "shapefile round trip" {
+    let folder = fmtTOut("shp")
+    let utm = geodesy.epsg(32651) ?? cartography.lonLat()
+    for crs in [cartography.lonLat(), utm] {
+        for l in fmtTSamples(crs: crs) {
+            let path = joinPath(folder, l.name + "{crs.code}.shp")
+            fmtTOk(cartography.writeShapefile(l, path))
+            match cartography.readShapefile(path) {
+                .ok(got) -> {
+                    fmtTSameLayer(got, l, columns: ["id", "name", "value", "big"], what: "shp {l.name}")
+                    expect(cartography.sameCrs(got.crs, crs), "shp {l.name}: CRS")
+                    expect(got.name == l.name + "{crs.code}" && got.source == path)
+                }
+                .failure(e) -> fail("shp {l.name}: {e.message}")
+            }
+        }
+    }
+    // The .dbf, .shx or .prj stand for the shapefile too.
+    let same = cartography.readLayers(joinPath(folder, "pts4326.dbf")).valueOr([])
+    expect(same.count == 1 && same[0].geoms.count == 3)
+}
+
+test "GeoPackage round trip of several layers" {
+    let folder = fmtTOut("gpkg")
+    let utm = geodesy.epsg(32651) ?? cartography.lonLat()
+    var layers = fmtTSamples()
+    var projected = fmtTSamples(crs: utm)[2]
+    projected.name = "pgs"
+    layers.append(projected)
+    let path = joinPath(folder, "all.gpkg")
+    fmtTOk(cartography.writeGeoPackage(layers, path))
+    // Written again over the first.
+    fmtTOk(cartography.writeGeoPackage(layers, path))
+    match cartography.readGeoPackage(path) {
+        .ok(got) -> {
+            expect(got.map { l in l.name } == ["pts", "lns", "pgs", "pgs_2"])
+            if got.count == 4 {
+                for k in 0..4 {
+                    fmtTSameLayer(got[k], layers[k], columns: ["id", "name", "value", "big"], what: "gpkg {k}")
+                    expect(cartography.sameCrs(got[k].crs, layers[k].crs), "gpkg {k}: CRS")
+                }
+                // The rows' numbers come back as a column fid, as QGIS shows them.
+                expect(got[0].fieldNames() == ["fid", "id", "name", "value", "big"])
+                expect(got[0].columns[1].kind == .int && got[0].columns[3].kind == .float && got[0].columns[2].kind == .text)
+                expect(got[0].columns[0].nums == [1.0, 2.0, 3.0])
+            }
+        }
+        .failure(e) -> fail("gpkg: {e.message}")
+    }
+}
+
+test "writeLayer and readLayers choose the format by extension" {
+    let folder = fmtTOut("any")
+    let l = fmtTSamples()[1]
+    for ext in cartography.writableExtensions() {
+        let path = joinPath(folder, "roads." + ext)
+        fmtTOk(cartography.writeLayer(l, path), ext)
+        match cartography.readLayers(path) {
+            .ok(got) -> {
+                expect(got.count == 1, ext)
+                if got.count == 1 {
+                    fmtTSameLayer(got[0], l, columns: [], tolerance: 1e-7, what: ext)
+                    // (A GeoPackage's tables are named after the layers.)
+                    expect(got[0].name == (if ext == "gpkg" { l.name } else { "roads" }) && got[0].source == path, ext)
+                }
+            }
+            .failure(e) -> fail("{ext}: {e.message}")
+        }
+    }
+    expect(cartography.writeLayer(fmtTSamples()[2], joinPath(folder, "x.gpx"))?.message == "can't write x.gpx: GPX holds points and lines, not polygons")
+    expect(cartography.writeLayer(l, joinPath(folder, "x.doc"))?.message == "can't write x.doc: it isn't a kind of file cartography writes")
+}
+
+/// The folder that `tools/oracle/formats_check_written.py` reads.
+fn fmtTOracleFolder() -> String {
+    joinPath(tempFolder(), "cartography-formats-oracle")
+}
+
+test "files are written for the oracle" {
+    let folder = fmtTOracleFolder()
+    createFolder(folder)
+    for name in ["points", "lines", "polygons", "utm51", "countries"] {
+        let layers = cartography.readLayers(fmtTPath(name + ".gpkg")).valueOr([])
+        expect(layers.count == 1, name)
+        if layers.count != 1 {
+            continue
+        }
+        let l = layers[0]
+        for ext in ["geojson", "shp", "gpkg", "csv", "kml", "wkt"] {
+            fmtTOk(cartography.writeLayer(l, joinPath(folder, name + "." + ext)), "{name}.{ext}")
+        }
+        if l.geomKind != .polygon {
+            fmtTOk(cartography.writeLayer(l, joinPath(folder, name + ".gpx")), "{name}.gpx")
+        }
+    }
+    let several = cartography.readGeoPackage(fmtTPath("several.gpkg")).valueOr([])
+    fmtTOk(cartography.writeGeoPackage(several, joinPath(folder, "several.gpkg")))
+    let trip = cartography.readLayers(fmtTPath("trip.gpx")).valueOr([])
+    expect(writeFile(path: joinPath(folder, "trip.gpx"), text: cartography.gpx(trip)))
+}
+
+// ----- damaged and odd input -----
+
+test "missing files, folders and unknown kinds give errors" {
+    expect(cartography.readLayers("/no/such/file.geojson").error()?.message == "can't read file.geojson: there's no such file")
+    expect(cartography.readLayers("/no/such/file.shp").error()?.message == "can't read file.shp: there's no such file")
+    expect(cartography.readLayers("/no/such/file.gpkg").error()?.message == "can't read file.gpkg: there's no such file")
+    expect(cartography.readLayers(fmtTFolder() + "/expected.json").isOk() == false)
+    expect(cartography.readLayers(fmtTPath("points.prj")).isOk())
+    expect(cartography.readLayers(fmtTPath("expected.xyz")).error()?.message == "can't read expected.xyz: there's no such file")
+    expect(cartography.readLayers(fmtTFolder() + ".gpkg").isOk() == false)
+    let folder = fmtTOut("odd")
+    expect(writeFile(path: joinPath(folder, "a.xyz"), text: "x"))
+    expect(cartography.readLayers(joinPath(folder, "a.xyz")).error()?.message == "can't read a.xyz: it isn't a kind of file cartography reads")
+    expect(writeFile(path: joinPath(folder, "text.gpkg"), text: "not a database"))
+    expect(cartography.readGeoPackage(joinPath(folder, "text.gpkg")).error()?.message == "can't read text.gpkg: it isn't a GeoPackage (it isn't an SQLite database)")
+    expect(!fileExists(joinPath(folder, "none.gpkg")) && !cartography.readGeoPackage(joinPath(folder, "none.gpkg")).isOk() && !fileExists(joinPath(folder, "none.gpkg")))
+}
+
+test "an SQLite database that isn't a GeoPackage, and broken shapes in one" {
+    let folder = fmtTOut("sqlite")
+    let path = joinPath(folder, "plain.gpkg")
+    match openDatabase(path) {
+        .ok(db) -> {
+            expect(db.execute("CREATE TABLE t (a INTEGER)").isOk())
+            db.close()
+        }
+        .failure(e) -> fail(e.message)
+    }
+    expect(cartography.readGeoPackage(path).error()?.message == "can't read plain.gpkg: it's an SQLite database, but not a GeoPackage (it has no gpkg_contents table)")
+    // Shapes that aren't GeoPackage blobs, or are cut short, are empty.
+    let good = joinPath(folder, "broken.gpkg")
+    fmtTOk(cartography.writeGeoPackage([fmtTSamples()[2]], good))
+    match openDatabase(good) {
+        .ok(db) -> {
+            expect(db.execute("UPDATE pgs SET geom = ? WHERE fid = 1", [Data(bytes: [71, 80, 0, 3, 1, 2])]).isOk())
+            expect(db.execute("UPDATE pgs SET geom = ? WHERE fid = 2", ["text, not a blob"]).isOk())
+            db.close()
+        }
+        .failure(e) -> fail(e.message)
+    }
+    let layers = cartography.readGeoPackage(good).valueOr([])
+    expect(layers.count == 1 && layers[0].geoms.count == 3)
+    if layers.count == 1 {
+        expect(layers[0].geoms[0].isEmpty() && layers[0].geoms[1].isEmpty() && !layers[0].geoms[2].isEmpty())
+    }
+}
+
+/// Copies of a fixture cut short at many places, and with bytes changed:
+/// reading each must give a layer or an error, not stop the program.
+fn fmtTDamage(_ file: String, siblings: [String] = []) {
+    let d = readData(fmtTPath(file)) ?? Data()
+    expect(d.count > 0, file)
+    let folder = fmtTOut("damage")
+    let ext = file.fileExtension
+    let base = file.substring(from: 0, to: file.count - ext.count - 1)
+    for s in siblings {
+        expect(copyFile(from: fmtTPath(base + "." + s), to: joinPath(folder, "f." + s)))
+    }
+    let path = joinPath(folder, "f." + ext)
+    var cuts = [0, 1, 2, 7, 8, 20, 50, 99, 100, 101, 108, 120, d.count / 3, d.count / 2, d.count - 9, d.count - 1]
+    var seed = 12345
+    for _ in 0..12 {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        cuts.append(seed % max(d.count, 1))
+    }
+    var tries = 0
+    for cut in cuts {
+        if cut < 0 || cut > d.count {
+            continue
+        }
+        expect(writeData(path: path, data: d.slice(from: 0, to: cut)))
+        let ignored = cartography.readLayers(path)
+        tries += 1
+    }
+    // Bytes changed here and there.
+    for round in 0..24 {
+        var changed = d
+        for _ in 0..(1 + round % 4) {
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            let at = seed % d.count
+            changed[at] = (changed[at] + 1 + seed % 254) % 256
+        }
+        expect(writeData(path: path, data: changed))
+        let ignored = cartography.readLayers(path)
+        tries += 1
+    }
+    expect(tries > 30)
+}
+
+test "damaged shapefiles don't stop the program" {
+    fmtTDamage("polygons.shp", siblings: ["dbf", "shx", "prj"])
+    fmtTDamage("countries.shp", siblings: ["dbf", "prj", "cpg"])
+    fmtTDamage("points.dbf", siblings: ["shp", "shx"])
+    fmtTDamage("lines.prj", siblings: ["shp", "dbf"])
+}
+
+test "damaged GeoPackages don't stop the program" {
+    fmtTDamage("several.gpkg")
+}
+
+test "damaged text files don't stop the program" {
+    fmtTDamage("polygons.geojson")
+    fmtTDamage("polygons.kml")
+    fmtTDamage("trip.gpx")
+    fmtTDamage("polygons_wkt.csv")
+}
+
+test "odd text gives errors that say what's wrong" {
+    expect(cartography.readGeoJSON("").error()?.message == "can't read the text: GeoJSON starts with \{ at line 1, column 1")
+    expect(!cartography.readGeoJSON("\{\"type\": \"FeatureCollection\", \"features\": [").isOk())
+    expect(!cartography.readGeoJSON("[1, 2]", name: "x").isOk())
+    expect(!cartography.readGeoJSON("\{\"type\":\"Topology\",\"objects\":\{}}").isOk())
+    expect(!cartography.readGeoJSON("\{\"type\":\"Point\",\"coordinates\":[1]}").isOk() ||
+           cartography.readGeoJSON("\{\"type\":\"Point\",\"coordinates\":[1]}").valueOr([])[0].geoms[0].isEmpty())
+    var deep = ""
+    for _ in 0..5000 {
+        deep += "["
+    }
+    let deepJson = cartography.readGeoJSON("\{\"type\":\"Point\",\"coordinates\":" + deep + "}")
+    expect(!deepJson.isOk() || deepJson.valueOr([]).count == 1)
+    let deepWkt = cartography.geometryFromWkt("GEOMETRYCOLLECTION (" + "GEOMETRYCOLLECTION (".repeated(3000))
+    expect(!deepWkt.isOk())
+    expect(cartography.geometryFromWkt("POINT (1)").error()?.message == "\"POINT (1)\" isn't WKT")
+    for bad in ["", "POINT", "POINT (", "POLYGON ((0 0, 1 1", "LINESTRING (a b)", "CIRCLE (1 2)", "POINT (1 2) extra",
+                "MULTIPOINT ((1 2), (3", "POINT (1e999 2)"] {
+        expect(!cartography.geometryFromWkt(bad).isOk(), bad)
+    }
+    expect(!cartography.readKML("<kml><Document><Placemark>").isOk())
+    expect(!cartography.readKML("<html></html>").isOk())
+    expect(cartography.readKML("<kml></kml>").valueOr([]).count == 1)
+    expect(!cartography.readGPX("not xml at all").isOk())
+    expect(cartography.readGPX("<gpx><wpt lat=\"x\" lon=\"1\"/></gpx>").valueOr([])[0].geoms[0].isEmpty())
+    expect(cartography.readCSV("").error()?.message == "can't read the text: there's nothing in it")
+    expect(cartography.readCSV("\"unclosed,quote\n1,2").isOk())
+    for bytes in [[0, 0], [1], [1, 1, 0, 0], [1, 2, 0, 0, 0, 255, 255, 255, 127], [0, 0, 0, 0, 3, 0, 0, 0, 1],
+                  [1, 7, 0, 0, 0, 1, 0, 0, 0, 1, 7, 0, 0, 0, 1, 0, 0, 0], [1, 99, 0, 0, 0]] {
+        expect(!cartography.geometryFromWkb(Data(bytes: bytes)).isOk(), "{bytes.count} bytes")
+    }
+}
