@@ -1,0 +1,509 @@
+// cartography: styles. The palette, color ramps, classes of values
+// (equal intervals, quantiles, natural breaks, pretty breaks), categorized
+// and graduated styles, and where labels go on a shape.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+/// Colors that are easy to tell apart, for categories and new layers.
+public fn palette() -> [Rgba] {
+    [
+        rgb(31, 119, 180), rgb(255, 127, 14), rgb(44, 160, 44), rgb(214, 39, 40), rgb(148, 103, 189), rgb(140, 86, 75),
+        rgb(227, 119, 194), rgb(127, 127, 127), rgb(188, 189, 34), rgb(23, 190, 207), rgb(174, 199, 232), rgb(255, 187, 120),
+        rgb(152, 223, 138), rgb(255, 152, 150), rgb(197, 176, 213), rgb(196, 156, 148),
+    ]
+}
+
+/// The names of the color ramps.
+public fn rampNames() -> [String] {
+    ["Viridis", "Magma", "Plasma", "Turbo", "Blues", "Greens", "Reds", "Oranges", "Purples", "Greys", "YlGnBu", "YlOrRd", "RdYlGn", "RdYlBu", "Spectral", "Terrain"]
+}
+
+/// A ramp's colors, evenly spaced from its start to its end, as r, g, b
+/// triples.
+fn rampStops(_ name: String) -> [Int] {
+    match name {
+        "Magma" -> [0, 0, 4, 59, 15, 112, 140, 41, 129, 222, 73, 104, 254, 159, 109, 252, 253, 191]
+        "Plasma" -> [13, 8, 135, 106, 0, 168, 177, 42, 144, 225, 100, 98, 252, 166, 54, 240, 249, 33]
+        "Turbo" -> [48, 18, 59, 65, 125, 247, 26, 228, 182, 164, 252, 60, 251, 155, 6, 122, 4, 3]
+        "Blues" -> [247, 251, 255, 198, 219, 239, 107, 174, 214, 33, 113, 181, 8, 48, 107]
+        "Greens" -> [247, 252, 245, 199, 233, 192, 116, 196, 118, 35, 139, 69, 0, 68, 27]
+        "Reds" -> [255, 245, 240, 252, 187, 161, 251, 106, 74, 203, 24, 29, 103, 0, 13]
+        "Oranges" -> [255, 245, 235, 253, 208, 162, 253, 141, 60, 217, 72, 1, 127, 39, 4]
+        "Purples" -> [252, 251, 253, 218, 218, 235, 158, 154, 200, 106, 81, 163, 63, 0, 125]
+        "Greys" -> [255, 255, 255, 217, 217, 217, 150, 150, 150, 82, 82, 82, 0, 0, 0]
+        "YlGnBu" -> [255, 255, 217, 199, 233, 180, 65, 182, 196, 34, 94, 168, 8, 29, 88]
+        "YlOrRd" -> [255, 255, 204, 254, 217, 118, 253, 141, 60, 227, 26, 28, 128, 0, 38]
+        "RdYlGn" -> [215, 48, 39, 253, 174, 97, 255, 255, 191, 166, 217, 106, 26, 152, 80]
+        "RdYlBu" -> [215, 48, 39, 253, 174, 97, 255, 255, 191, 171, 217, 233, 69, 117, 180]
+        "Spectral" -> [213, 62, 79, 253, 174, 97, 255, 255, 191, 171, 221, 164, 50, 136, 189]
+        "Terrain" -> [51, 102, 153, 0, 153, 102, 120, 190, 100, 240, 230, 140, 170, 120, 80, 250, 250, 250]
+        _ -> [68, 1, 84, 65, 68, 135, 42, 120, 142, 34, 168, 132, 122, 209, 81, 253, 231, 37]
+    }
+}
+
+/// The color of a ramp at `t`, from 0 (its start) to 1 (its end).
+public fn rampColor(_ name: String, _ t: Float) -> Rgba {
+    let stops = rampStops(name)
+    let n = stops.count / 3
+    let at = (if t.isNaN { 0.0 } else { t }).clamped(min: 0.0, max: 1.0) * Float(n - 1)
+    let i = min(Int(floor(at)), n - 2)
+    let f = at - Float(i)
+    let mix: fn(Int) -> Int = { k in Int(round(Float(stops[3 * i + k]) * (1.0 - f) + Float(stops[3 * i + 3 + k]) * f)) }
+    Rgba(r: mix(0), g: mix(1), b: mix(2))
+}
+
+/// The symbol a new layer starts with: a color of the palette (by `seed`),
+/// in the way its kind of shape is usually drawn.
+public fn defaultSymbol(_ kind: GeomKind, seed: Int) -> Symbol {
+    let colors = palette()
+    let c = colors[((seed % colors.count) + colors.count) % colors.count]
+    match kind {
+        .point -> Symbol(fill: c, stroke: rgb(40, 40, 40), strokeWidth: 0.8, size: 7.0)
+        .line -> Symbol(fill: c, stroke: c, strokeWidth: 1.4)
+        .polygon -> Symbol(fill: c.withAlpha(0.75), stroke: rgb(50, 50, 50), strokeWidth: 0.6)
+    }
+}
+
+/// A symbol like `base` in another color.
+public fn recolored(_ base: Symbol, _ c: Rgba, kind: GeomKind) -> Symbol {
+    var s = base
+    if kind == .line {
+        s.stroke = c
+    } else {
+        s.fill = c.withAlpha(base.fill.a)
+    }
+    s
+}
+
+/// The different values of a column, in order (numbers by size), at most
+/// `limit` of them.
+public fn uniqueValues(_ column: Column, limit: Int = 500) -> [String] {
+    var seen: Set<String> = []
+    var out: [String] = []
+    if column.kind == .text {
+        for v in column.texts {
+            if !seen.contains(v) {
+                seen.insert(v)
+                out.append(v)
+                if out.count > limit {
+                    break
+                }
+            }
+        }
+        return out.sorted()
+    }
+    var nums: [Float] = []
+    var hasNull = false
+    for x in column.nums {
+        if x.isNaN {
+            hasNull = true
+            continue
+        }
+        let key = formatNumber(x)
+        if !seen.contains(key) {
+            seen.insert(key)
+            nums.append(x)
+            if nums.count > limit {
+                break
+            }
+        }
+    }
+    out = nums.sorted().map { x in formatNumber(x) }
+    if hasNull {
+        out.append("")
+    }
+    out
+}
+
+/// A style with one class for each different value of a field.
+public fn categorizedStyle(layer: Layer, field: String, ramp: String = "") -> Style {
+    var style = Style(kind: .categorized, symbol: layer.style.symbol, field: field, ramp: ramp)
+    if let c = layer.columnIndex(field) {
+        let values = uniqueValues(layer.columns[c], limit: 250)
+        let colors = palette()
+        for (i, v) in values.enumerated() {
+            let color = if ramp.isEmpty { colors[i % colors.count] } else { rampColor(ramp, Float(i) / Float(max(values.count - 1, 1))) }
+            style.classes.append(StyleClass(label: if v.isEmpty { "(no value)" } else { v }, value: v, symbol: recolored(layer.style.symbol, color, kind: layer.geomKind)))
+        }
+    }
+    style
+}
+
+/// The limits of `count` classes for some numbers: `count + 1` values from
+/// the smallest to the largest.
+public fn classBreaks(_ values: [Float], mode: ClassMode, count: Int) -> [Float] {
+    let sorted = values.filter { x in x.isFinite }.sorted()
+    let n = max(count, 1)
+    if sorted.isEmpty {
+        return []
+    }
+    let lo = sorted[0]
+    let hi = sorted[sorted.count - 1]
+    var breaks: [Float] = [lo]
+    match mode {
+        .equalInterval -> {
+            for i in 1..n {
+                breaks.append(lo + (hi - lo) * Float(i) / Float(n))
+            }
+        }
+        .quantile -> {
+            for i in 1..n {
+                breaks.append(sorted[min(sorted.count * i / n, sorted.count - 1)])
+            }
+        }
+        .prettyBreaks -> {
+            let step = niceStep((hi - lo) / Float(n))
+            var b = floor(lo / step) * step + step
+            while b < hi && breaks.count < 50 {
+                if b > lo {
+                    breaks.append(b)
+                }
+                b += step
+            }
+        }
+        .naturalBreaks -> {
+            let inner = jenksBreaks(sorted, n)
+            for b in inner {
+                breaks.append(b)
+            }
+        }
+    }
+    breaks.append(hi)
+    // The same limit twice would be a class without values.
+    var out: [Float] = []
+    for b in breaks {
+        if out.isEmpty || b > out[out.count - 1] {
+            out.append(b)
+        }
+    }
+    if out.count == 1 {
+        out.append(hi)
+    }
+    out
+}
+
+fn niceStep(_ rough: Float) -> Float {
+    if rough <= 0.0 || !rough.isFinite {
+        return 1.0
+    }
+    let power = powerOfTen(Int(floor(log10(rough))))
+    let lead = rough / power
+    if lead <= 1.0 {
+        return power
+    }
+    if lead <= 2.0 {
+        return 2.0 * power
+    }
+    if lead <= 5.0 {
+        return 5.0 * power
+    }
+    10.0 * power
+}
+
+/// Natural breaks (Jenks, by Fisher's exact method): the limits between
+/// `n` classes that keep like values together. On at most 800 values taken
+/// evenly from the sorted ones, which is plenty to place the limits.
+fn jenksBreaks(_ sorted: [Float], _ n: Int) -> [Float] {
+    var data: [Float] = []
+    let most = 800
+    if sorted.count > most {
+        for i in 0..most {
+            data.append(sorted[i * (sorted.count - 1) / (most - 1)])
+        }
+    } else {
+        data = sorted
+    }
+    let m = data.count
+    let k = min(n, m)
+    if k < 2 {
+        return []
+    }
+    // Sums, for the variance of any stretch in constant time.
+    var sum: [Float] = [0.0]
+    var squares: [Float] = [0.0]
+    for x in data {
+        sum.append(sum[sum.count - 1] + x)
+        squares.append(squares[squares.count - 1] + x * x)
+    }
+    let cost: fn(Int, Int) -> Float = { i, j in
+        // Of the values i up to j (not included).
+        let count = Float(j - i)
+        let s = sum[j] - sum[i]
+        squares[j] - squares[i] - s * s / count
+    }
+    // best[c][j]: the least cost of j values in c + 1 classes.
+    var best: [[Float]] = []
+    var from: [[Int]] = []
+    var first: [Float] = [0.0]
+    for j in 1..m + 1 {
+        first.append(cost(0, j))
+    }
+    best.append(first)
+    from.append([])
+    for c in 1..k {
+        var row: [Float] = []
+        var cut: [Int] = []
+        for j in 0..m + 1 {
+            var least = 0.0
+            var at = c
+            if j > c {
+                least = best[c - 1][c] + cost(c, j)
+                var i = c + 1
+                while i < j {
+                    let total = best[c - 1][i] + cost(i, j)
+                    if total < least {
+                        least = total
+                        at = i
+                    }
+                    i += 1
+                }
+            }
+            row.append(least)
+            cut.append(at)
+        }
+        best.append(row)
+        from.append(cut)
+    }
+    var breaks: [Float] = []
+    var j = m
+    var c = k - 1
+    while c >= 1 {
+        let i = from[c][j]
+        breaks.insert(data[min(i, m - 1)], at: 0)
+        j = i
+        c -= 1
+    }
+    breaks
+}
+
+/// A style with classes of values of a numeric field, colored along a ramp.
+public fn graduatedStyle(layer: Layer, field: String, mode: ClassMode, count: Int, ramp: String) -> Style {
+    var style = Style(kind: .graduated, symbol: layer.style.symbol, field: field, mode: mode, ramp: ramp)
+    if let c = layer.columnIndex(field) {
+        var values: [Float] = []
+        for i in 0..layer.columns[c].count() {
+            values.append(layer.columns[c].number(i))
+        }
+        let breaks = classBreaks(values, mode: mode, count: count)
+        let classes = breaks.count - 1
+        for i in 0..max(classes, 0) {
+            let t = if classes > 1 { Float(i) / Float(classes - 1) } else { 0.5 }
+            let label = "{formatNumber(breaks[i], decimals: 2)} – {formatNumber(breaks[i + 1], decimals: 2)}"
+            style.classes.append(StyleClass(label: label, lower: breaks[i], upper: breaks[i + 1], symbol: recolored(layer.style.symbol, rampColor(ramp, t), kind: layer.geomKind)))
+        }
+    }
+    style
+}
+
+/// The class a value falls in, for a graduated style (-1: none).
+public fn classForNumber(_ style: Style, _ x: Float) -> Int {
+    if x.isNaN {
+        return -1
+    }
+    let n = style.classes.count
+    for i in 0..n {
+        let c = style.classes[i]
+        if x >= c.lower && (x < c.upper || (i == n - 1 && x <= c.upper)) {
+            return i
+        }
+    }
+    -1
+}
+
+/// Where a shape's label goes: on a point, in the middle of the longest
+/// line, or at the center of the largest ring.
+public fn labelAnchor(_ shape: Geometry) -> (Float, Float) {
+    if shape.parts.isEmpty || shape.box.empty {
+        return (0.0 / 0.0, 0.0 / 0.0)
+    }
+    match shape.kind {
+        .point -> (shape.parts[0][0], shape.parts[0][1])
+        .line -> {
+            var longest = 0
+            for (i, p) in shape.parts.enumerated() {
+                if p.count > shape.parts[longest].count {
+                    longest = i
+                }
+            }
+            lineMiddle(shape.parts[longest])
+        }
+        .polygon -> {
+            var largest = 0
+            var most = -1.0
+            for i in shape.polygons {
+                let a = abs(ringArea2(shape.parts[i]))
+                if a > most {
+                    most = a
+                    largest = i
+                }
+            }
+            ringCenter(shape.parts[largest])
+        }
+    }
+}
+
+/// The point a part of the way (0 to 1) along a line.
+fn lineSpot(_ line: [Float], _ part: Float) -> (Float, Float) {
+    var total = 0.0
+    var i = 0
+    while i + 3 < line.count {
+        total += sqrt((line[i + 2] - line[i]) * (line[i + 2] - line[i]) + (line[i + 3] - line[i + 1]) * (line[i + 3] - line[i + 1]))
+        i += 2
+    }
+    var left = total * part
+    i = 0
+    while i + 3 < line.count {
+        let d = sqrt((line[i + 2] - line[i]) * (line[i + 2] - line[i]) + (line[i + 3] - line[i + 1]) * (line[i + 3] - line[i + 1]))
+        if d >= left && d > 0.0 {
+            let t = left / d
+            return (line[i] + (line[i + 2] - line[i]) * t, line[i + 1] + (line[i + 3] - line[i + 1]) * t)
+        }
+        left -= d
+        i += 2
+    }
+    (line[line.count - 2], line[line.count - 1])
+}
+
+/// Which way a line runs around its middle, for a label along it: radians
+/// on screen (y down), between -π/2 and π/2 so the text is never upside
+/// down. 0 for anything but a line.
+public fn labelAngle(_ shape: Geometry) -> Float {
+    if shape.kind != .line || shape.parts.isEmpty {
+        return 0.0
+    }
+    var longest = 0
+    for (i, p) in shape.parts.enumerated() {
+        if p.count > shape.parts[longest].count {
+            longest = i
+        }
+    }
+    let line = shape.parts[longest]
+    if line.count < 4 {
+        return 0.0
+    }
+    let (x1, y1) = lineSpot(line, 0.4)
+    let (x2, y2) = lineSpot(line, 0.6)
+    if x1 == x2 && y1 == y2 {
+        return 0.0
+    }
+    var angle = atan2(-(y2 - y1), x2 - x1)
+    if angle > pi / 2.0 {
+        angle -= pi
+    } else if angle < -pi / 2.0 {
+        angle += pi
+    }
+    angle
+}
+
+/// The point half way along a line.
+fn lineMiddle(_ line: [Float]) -> (Float, Float) {
+    if line.count < 4 {
+        return (line[0], line[1])
+    }
+    var total = 0.0
+    var i = 0
+    while i + 3 < line.count {
+        total += sqrt((line[i + 2] - line[i]) * (line[i + 2] - line[i]) + (line[i + 3] - line[i + 1]) * (line[i + 3] - line[i + 1]))
+        i += 2
+    }
+    var left = total / 2.0
+    i = 0
+    while i + 3 < line.count {
+        let d = sqrt((line[i + 2] - line[i]) * (line[i + 2] - line[i]) + (line[i + 3] - line[i + 1]) * (line[i + 3] - line[i + 1]))
+        if d >= left && d > 0.0 {
+            let t = left / d
+            return (line[i] + (line[i + 2] - line[i]) * t, line[i + 1] + (line[i + 3] - line[i + 1]) * t)
+        }
+        left -= d
+        i += 2
+    }
+    (line[0], line[1])
+}
+
+/// A point inside a ring to put a label on: its center of area if that's
+/// inside, else the middle of its widest stretch at that height.
+fn ringCenter(_ ring: [Float]) -> (Float, Float) {
+    var a = 0.0
+    var cx = 0.0
+    var cy = 0.0
+    var i = 0
+    let (ox, oy) = (ring[0], ring[1])
+    while i + 3 < ring.count {
+        let (x1, y1, x2, y2) = (ring[i] - ox, ring[i + 1] - oy, ring[i + 2] - ox, ring[i + 3] - oy)
+        let cross = x1 * y2 - x2 * y1
+        a += cross
+        cx += (x1 + x2) * cross
+        cy += (y1 + y2) * cross
+        i += 2
+    }
+    if a == 0.0 {
+        return (ring[0], ring[1])
+    }
+    let x = ox + cx / (3.0 * a)
+    let y = oy + cy / (3.0 * a)
+    if ringContains(ring, x, y) {
+        return (x, y)
+    }
+    // Where a level line at y crosses the ring: the middle of its longest stretch inside.
+    var crossings: [Float] = []
+    i = 0
+    while i + 3 < ring.count {
+        let (y1, y2) = (ring[i + 1], ring[i + 3])
+        if (y1 > y) != (y2 > y) {
+            crossings.append(ring[i] + (y - y1) * (ring[i + 2] - ring[i]) / (y2 - y1))
+        }
+        i += 2
+    }
+    let xs = crossings.sorted()
+    var bestX = x
+    var widest = -1.0
+    var k = 0
+    while k + 1 < xs.count {
+        if xs[k + 1] - xs[k] > widest {
+            widest = xs[k + 1] - xs[k]
+            bestX = (xs[k] + xs[k + 1]) / 2.0
+        }
+        k += 2
+    }
+    (bestX, y)
+}
+
+/// A polygon with its outer rings counterclockwise and its holes clockwise,
+/// as overlapping shapes must be to be filled together.
+public fn oriented(_ g: Geometry) -> Geometry {
+    if g.kind != .polygon {
+        return g
+    }
+    var parts: [[Float]] = []
+    var starts: Set<Int> = []
+    for s in g.polygons {
+        starts.insert(s)
+    }
+    for (i, ring) in g.parts.enumerated() {
+        let ccw = ringArea2(ring) > 0.0
+        if ccw == starts.contains(i) {
+            parts.append(ring)
+        } else {
+            var turned: [Float] = []
+            var k = ring.count - 2
+            while k >= 0 {
+                turned.append(ring[k])
+                turned.append(ring[k + 1])
+                k -= 2
+            }
+            parts.append(turned)
+        }
+    }
+    Geometry(kind: g.kind, parts: parts, polygons: g.polygons, box: g.box)
+}
+
+/// 10 to a whole power, exactly where a Float can be. (Not `pow(10, n)`:
+/// the released Tessel can't link the function that compiles to.)
+public fn powerOfTen(_ n: Int) -> Float {
+    var x = 1.0
+    for _ in 0..min(abs(n), 400) {
+        x = x * 10.0
+    }
+    if n < 0 { 1.0 / x } else { x }
+}

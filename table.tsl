@@ -1,0 +1,252 @@
+// cartography: attributes, what's known about each feature besides its
+// shape. A layer keeps them in columns, one for each field, all as long as
+// the layer has features. Numbers are kept as Floats (whole numbers up to
+// 2^53 are exact), with NaN where there's no value; text, with "" where
+// there's none.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+/// What a column holds.
+public enum FieldKind { int, float, text }
+
+/// One attribute of one feature, whatever its field's kind.
+public enum Value {
+    null
+    num(value: Float)
+    text(value: String)
+    bool(value: Bool)
+
+    fn isNull() -> Bool {
+        match self {
+            .null -> true
+            .num(x) -> x.isNaN
+            _ -> false
+        }
+    }
+
+    /// As it's shown: whole numbers without decimals, nothing for null.
+    fn display() -> String {
+        match self {
+            .null -> ""
+            .num(x) -> formatNumber(x)
+            .text(s) -> s
+            .bool(b) -> if b { "true" } else { "false" }
+        }
+    }
+
+    /// As a number: NaN if it isn't one.
+    fn number() -> Float {
+        match self {
+            .null -> 0.0 / 0.0
+            .num(x) -> x
+            .text(s) -> Float(s) ?? (0.0 / 0.0)
+            .bool(b) -> if b { 1.0 } else { 0.0 }
+        }
+    }
+
+    fn truthy() -> Bool {
+        match self {
+            .null -> false
+            .num(x) -> !x.isNaN && x != 0.0
+            .text(s) -> !s.isEmpty
+            .bool(b) -> b
+        }
+    }
+}
+
+/// A number as text: `12` for 12.0, up to `decimals` digits otherwise,
+/// without zeros at the end.
+public fn formatNumber(_ x: Float, decimals: Int = 6) -> String {
+    if x.isNaN {
+        return ""
+    }
+    if !x.isFinite {
+        return if x > 0.0 { "inf" } else { "-inf" }
+    }
+    if x == floor(x) && abs(x) < 1000000000000000.0 {
+        return "{Int(x)}"
+    }
+    var text = x.formatted(decimals: decimals)
+    if text.contains(".") {
+        while text.hasSuffix("0") {
+            text = text.substring(from: 0, to: text.count - 1)
+        }
+        if text.hasSuffix(".") {
+            text = text.substring(from: 0, to: text.count - 1)
+        }
+    }
+    text
+}
+
+/// A number with a separator between its thousands: 1,234,567.5
+public fn groupedNumber(_ x: Float, decimals: Int = 0) -> String {
+    if !x.isFinite {
+        return formatNumber(x)
+    }
+    let text = abs(x).formatted(decimals: decimals)
+    let dot = text.find(".") ?? text.count
+    let whole = text.substring(from: 0, to: dot)
+    var out = ""
+    var n = 0
+    for ch in whole.characters.reversed() {
+        if n > 0 && n % 3 == 0 {
+            out = "," + out
+        }
+        out = ch + out
+        n += 1
+    }
+    (if x < 0.0 { "-" } else { "" }) + out + text.substring(from: dot, to: text.count)
+}
+
+public struct Column {
+    name: String
+    kind: FieldKind = FieldKind.text
+    /// The values of an `.int` or `.float` column (NaN: none).
+    nums: [Float] = []
+    /// The values of a `.text` column ("": none).
+    texts: [String] = []
+
+    fn count() -> Int {
+        if kind == .text { texts.count } else { nums.count }
+    }
+
+    fn isNumeric() -> Bool {
+        kind != .text
+    }
+
+    fn value(_ row: Int) -> Value {
+        if kind == .text {
+            let s = texts[row]
+            return if s.isEmpty { Value.null } else { Value.text(value: s) }
+        }
+        let x = nums[row]
+        if x.isNaN { Value.null } else { Value.num(value: x) }
+    }
+
+    /// The value as it's shown in a table.
+    fn display(_ row: Int) -> String {
+        if kind == .text {
+            return texts[row]
+        }
+        formatNumber(nums[row])
+    }
+
+    /// The value as a number: NaN if it has none, or its text isn't one.
+    fn number(_ row: Int) -> Float {
+        if kind == .text {
+            return Float(texts[row].trim()) ?? (0.0 / 0.0)
+        }
+        nums[row]
+    }
+
+    fn isNull(_ row: Int) -> Bool {
+        if kind == .text { texts[row].isEmpty } else { nums[row].isNaN }
+    }
+
+    fn set(_ row: Int, to: Value) {
+        if kind == .text {
+            texts[row] = to.display()
+        } else {
+            let x = to.number()
+            nums[row] = if kind == .int && x.isFinite { round(x) } else { x }
+        }
+    }
+
+    fn append(_ value: Value) {
+        if kind == .text {
+            texts.append(value.display())
+        } else {
+            let x = value.number()
+            nums.append(if kind == .int && x.isFinite { round(x) } else { x })
+        }
+    }
+
+    fn remove(at: Int) {
+        if kind == .text {
+            texts.remove(at: at)
+        } else {
+            nums.remove(at: at)
+        }
+    }
+
+    /// A column of the same field with only the rows listed.
+    fn picking(_ rows: [Int]) -> Column {
+        var out = Column(name: name, kind: kind)
+        if kind == .text {
+            for r in rows {
+                out.texts.append(texts[r])
+            }
+        } else {
+            for r in rows {
+                out.nums.append(nums[r])
+            }
+        }
+        out
+    }
+}
+
+/// A column of `count` empty values.
+public fn emptyColumn(name: String, kind: FieldKind, count: Int) -> Column {
+    var c = Column(name: name, kind: kind)
+    if kind == .text {
+        for _ in 0..count {
+            c.texts.append("")
+        }
+    } else {
+        let none = 0.0 / 0.0
+        for _ in 0..count {
+            c.nums.append(none)
+        }
+    }
+    c
+}
+
+public fn textColumn(name: String, values: [String]) -> Column {
+    Column(name: name, kind: .text, texts: values)
+}
+
+public fn numberColumn(name: String, values: [Float], whole: Bool = false) -> Column {
+    Column(name: name, kind: if whole { FieldKind.int } else { FieldKind.float }, nums: values)
+}
+
+/// Makes a column from text values as they come from a file: a column of
+/// whole numbers if every value is one, of numbers if every value is a
+/// number, of text otherwise. Empty values are "no value" in any of them.
+public fn columnFromTexts(name: String, values: [String]) -> Column {
+    var whole = true
+    var numeric = true
+    var any = false
+    var nums: [Float] = []
+    let none = 0.0 / 0.0
+    for raw in values {
+        let v = raw.trim()
+        if v.isEmpty {
+            nums.append(none)
+            continue
+        }
+        any = true
+        if let x = Float(v) {
+            if !x.isFinite {
+                numeric = false
+                break
+            }
+            if x != floor(x) || v.contains(".") || v.contains("e") || v.contains("E") {
+                whole = false
+            }
+            // Codes like 007 or +63… are text, not numbers.
+            if (v.hasPrefix("0") && v.count > 1 && !v.hasPrefix("0.")) || v.hasPrefix("+") {
+                numeric = false
+                break
+            }
+            nums.append(x)
+        } else {
+            numeric = false
+            break
+        }
+    }
+    if numeric && any {
+        return Column(name: name, kind: if whole { FieldKind.int } else { FieldKind.float }, nums: nums)
+    }
+    Column(name: name, kind: .text, texts: values)
+}

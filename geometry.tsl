@@ -1,0 +1,346 @@
+// cartography: geometry. The shape of one feature (points, lines or
+// polygons, each possibly in several parts) and Box, the rectangle around
+// shapes. Coordinates are kept as numbers in a row: x, y, x, y, … (x is
+// east or longitude, y north or latitude).
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+// A geometry is a list of such rows, its *parts*:
+//
+// - points:   one part, with every point of the feature in it;
+// - lines:    one part for each line;
+// - polygons: one part for each ring. A ring is closed: its last point is
+//             its first again. `polygons` holds where each polygon starts
+//             in `parts`; that ring is its outside, and the rings up to the
+//             next polygon are its holes.
+
+/// What a geometry is made of.
+public enum GeomKind { point, line, polygon }
+
+/// A rectangle with sides along the axes. `empty` until something is added.
+public struct Box {
+    minX: Float = 0.0
+    minY: Float = 0.0
+    maxX: Float = 0.0
+    maxY: Float = 0.0
+    empty: Bool = true
+
+    fn width() -> Float {
+        if empty { 0.0 } else { maxX - minX }
+    }
+
+    fn height() -> Float {
+        if empty { 0.0 } else { maxY - minY }
+    }
+
+    fn centerX() -> Float {
+        (minX + maxX) / 2.0
+    }
+
+    fn centerY() -> Float {
+        (minY + maxY) / 2.0
+    }
+
+    /// Grows the box to hold the point.
+    fn add(_ x: Float, _ y: Float) {
+        if !x.isFinite || !y.isFinite {
+            return
+        }
+        if empty {
+            minX = x
+            maxX = x
+            minY = y
+            maxY = y
+            empty = false
+            return
+        }
+        if x < minX { minX = x }
+        if x > maxX { maxX = x }
+        if y < minY { minY = y }
+        if y > maxY { maxY = y }
+    }
+
+    /// Grows the box to hold another one.
+    fn include(_ other: Box) {
+        if other.empty {
+            return
+        }
+        add(other.minX, other.minY)
+        add(other.maxX, other.maxY)
+    }
+
+    fn contains(_ x: Float, _ y: Float) -> Bool {
+        !empty && x >= minX && x <= maxX && y >= minY && y <= maxY
+    }
+
+    fn intersects(_ other: Box) -> Bool {
+        !empty && !other.empty && minX <= other.maxX && maxX >= other.minX && minY <= other.maxY && maxY >= other.minY
+    }
+
+    /// The box with `margin` added on every side.
+    fn grown(by: Float) -> Box {
+        if empty {
+            return self
+        }
+        Box(minX: minX - by, minY: minY - by, maxX: maxX + by, maxY: maxY + by, empty: false)
+    }
+}
+
+public fn boxOf(minX: Float, minY: Float, maxX: Float, maxY: Float) -> Box {
+    Box(minX: min(minX, maxX), minY: min(minY, maxY), maxX: max(minX, maxX), maxY: max(minY, maxY), empty: false)
+}
+
+public struct Geometry {
+    kind: GeomKind = GeomKind.point
+    parts: [[Float]] = []
+    /// For polygons: the place in `parts` of each polygon's outer ring.
+    polygons: [Int] = []
+    /// The box around every point.
+    box: Box = Box()
+
+    /// A feature without a shape (a row of a table).
+    fn isEmpty() -> Bool {
+        box.empty
+    }
+
+    fn pointCount() -> Int {
+        var n = 0
+        for p in parts {
+            n += p.count / 2
+        }
+        n
+    }
+
+    /// How many points, lines or polygons it's made of.
+    fn memberCount() -> Int {
+        match kind {
+            .point -> pointCount()
+            .line -> parts.count
+            .polygon -> polygons.count
+        }
+    }
+
+    /// The rings of polygon `i`: its outside, then its holes.
+    fn rings(of: Int) -> [[Float]] {
+        let from = polygons[of]
+        let to = if of + 1 < polygons.count { polygons[of + 1] } else { parts.count }
+        parts.slice(from: from, to: to)
+    }
+
+    /// The same shape, each point changed by `change` (which gets x, y and
+    /// returns the new x, y).
+    fn mapped(_ change: fn(Float, Float) -> (Float, Float)) -> Geometry {
+        var out: [[Float]] = []
+        for part in parts {
+            var moved: [Float] = []
+            var i = 0
+            while i + 1 < part.count {
+                let (x, y) = change(part[i], part[i + 1])
+                moved.append(x)
+                moved.append(y)
+                i += 2
+            }
+            out.append(moved)
+        }
+        makeGeometry(kind: kind, parts: out, polygons: polygons)
+    }
+}
+
+/// A geometry from its parts, with its box worked out. Rings of polygons
+/// are closed if they aren't.
+public fn makeGeometry(kind: GeomKind, parts: [[Float]], polygons: [Int] = []) -> Geometry {
+    var box = Box()
+    var kept: [[Float]] = []
+    for part in parts {
+        var p = part
+        if kind == .polygon && p.count >= 4 {
+            let n = p.count
+            if p[0] != p[n - 2] || p[1] != p[n - 1] {
+                p.append(p[0])
+                p.append(p[1])
+            }
+        }
+        var i = 0
+        while i + 1 < p.count {
+            box.add(p[i], p[i + 1])
+            i += 2
+        }
+        kept.append(p)
+    }
+    var starts = polygons
+    if kind == .polygon && starts.isEmpty && !kept.isEmpty {
+        starts = [0]
+    }
+    Geometry(kind: kind, parts: kept, polygons: starts, box: box)
+}
+
+public fn emptyGeometry(_ kind: GeomKind) -> Geometry {
+    Geometry(kind: kind)
+}
+
+public fn pointGeometry(_ x: Float, _ y: Float) -> Geometry {
+    makeGeometry(kind: .point, parts: [[x, y]])
+}
+
+/// Several points as one feature; `coords` is x, y, x, y, …
+public fn multiPointGeometry(_ coords: [Float]) -> Geometry {
+    makeGeometry(kind: .point, parts: [coords])
+}
+
+public fn lineGeometry(_ coords: [Float]) -> Geometry {
+    makeGeometry(kind: .line, parts: [coords])
+}
+
+public fn multiLineGeometry(_ parts: [[Float]]) -> Geometry {
+    makeGeometry(kind: .line, parts: parts)
+}
+
+/// One polygon: its outer ring, then its holes.
+public fn polygonGeometry(_ rings: [[Float]]) -> Geometry {
+    makeGeometry(kind: .polygon, parts: rings, polygons: [0])
+}
+
+/// Several polygons as one feature, each a list of rings (outer, then holes).
+public fn multiPolygonGeometry(_ polygons: [[[Float]]]) -> Geometry {
+    var parts: [[Float]] = []
+    var starts: [Int] = []
+    for rings in polygons {
+        if rings.isEmpty {
+            continue
+        }
+        starts.append(parts.count)
+        for r in rings {
+            parts.append(r)
+        }
+    }
+    makeGeometry(kind: .polygon, parts: parts, polygons: starts)
+}
+
+/// A rectangle as a polygon.
+public fn boxGeometry(_ b: Box) -> Geometry {
+    polygonGeometry([[b.minX, b.minY, b.maxX, b.minY, b.maxX, b.maxY, b.minX, b.maxY, b.minX, b.minY]])
+}
+
+/// Twice the area inside a ring, positive when it runs counterclockwise
+/// (with y up).
+public fn ringArea2(_ ring: [Float]) -> Float {
+    if ring.count < 6 {
+        return 0.0
+    }
+    // Measured from the ring's first point: far from the origin (a map in
+    // meters), the products would otherwise swallow a small ring's area.
+    let (ox, oy) = (ring[0], ring[1])
+    var sum = 0.0
+    var i = 0
+    while i + 3 < ring.count {
+        sum += (ring[i] - ox) * (ring[i + 3] - oy) - (ring[i + 2] - ox) * (ring[i + 1] - oy)
+        i += 2
+    }
+    sum
+}
+
+/// Is the point inside the ring (or on its edge)? Counts crossings of a ray
+/// to the right.
+public fn ringContains(_ ring: [Float], _ x: Float, _ y: Float) -> Bool {
+    var inside = false
+    var i = 0
+    while i + 3 < ring.count {
+        let (x1, y1, x2, y2) = (ring[i], ring[i + 1], ring[i + 2], ring[i + 3])
+        if (y1 > y) != (y2 > y) {
+            let at = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            if x < at {
+                inside = !inside
+            }
+        }
+        i += 2
+    }
+    inside
+}
+
+/// Is the point inside the polygon geometry (inside an outer ring and in
+/// none of its holes)?
+public fn polygonContains(_ g: Geometry, _ x: Float, _ y: Float) -> Bool {
+    if g.kind != .polygon || !g.box.contains(x, y) {
+        return false
+    }
+    for i in 0..g.polygons.count {
+        let rings = g.rings(of: i)
+        if rings.isEmpty || !ringContains(rings[0], x, y) {
+            continue
+        }
+        var inHole = false
+        for k in 1..rings.count {
+            if ringContains(rings[k], x, y) {
+                inHole = true
+                break
+            }
+        }
+        if !inHole {
+            return true
+        }
+    }
+    false
+}
+
+/// The distance from (px, py) to the segment from (x1, y1) to (x2, y2).
+public fn segmentDistance(_ px: Float, _ py: Float, _ x1: Float, _ y1: Float, _ x2: Float, _ y2: Float) -> Float {
+    let dx = x2 - x1
+    let dy = y2 - y1
+    let len2 = dx * dx + dy * dy
+    var t = 0.0
+    if len2 > 0.0 {
+        t = (((px - x1) * dx + (py - y1) * dy) / len2).clamped(min: 0.0, max: 1.0)
+    }
+    let ex = x1 + t * dx - px
+    let ey = y1 + t * dy - py
+    sqrt(ex * ex + ey * ey)
+}
+
+/// How far the point is from the geometry: 0 inside a polygon, otherwise
+/// the distance to its nearest point, line or edge. Infinity for an empty
+/// geometry.
+public fn distanceTo(_ g: Geometry, _ x: Float, _ y: Float) -> Float {
+    if g.isEmpty() {
+        return 1.0 / 0.0
+    }
+    if g.kind == .polygon && polygonContains(g, x, y) {
+        return 0.0
+    }
+    var best = 1.0 / 0.0
+    for part in g.parts {
+        if g.kind == .point {
+            var i = 0
+            while i + 1 < part.count {
+                let d = sqrt((part[i] - x) * (part[i] - x) + (part[i + 1] - y) * (part[i + 1] - y))
+                if d < best { best = d }
+                i += 2
+            }
+        } else {
+            if part.count == 2 {
+                let d = sqrt((part[0] - x) * (part[0] - x) + (part[1] - y) * (part[1] - y))
+                if d < best { best = d }
+            }
+            var i = 0
+            while i + 3 < part.count {
+                let d = segmentDistance(x, y, part[i], part[i + 1], part[i + 2], part[i + 3])
+                if d < best { best = d }
+                i += 2
+            }
+        }
+    }
+    best
+}
+
+/// The length of a line (x, y, x, y, …) in its own units.
+public fn lineLength(_ line: [Float]) -> Float {
+    var total = 0.0
+    var i = 0
+    while i + 3 < line.count {
+        let dx = line[i + 2] - line[i]
+        let dy = line[i + 3] - line[i + 1]
+        total += sqrt(dx * dx + dy * dy)
+        i += 2
+    }
+    total
+}

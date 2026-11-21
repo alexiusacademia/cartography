@@ -1,0 +1,8 @@
+// cartography: basemap tiles (stub, replaced by the tiles builder).
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+/// Draws a tile layer: the tiles on disk that the map shows.
+fn drawTileLayer(_ g: Graphics, _ layer: Layer, _ m: Map) {
+}

@@ -1,0 +1,11 @@
+// cartography: rasters (stub, replaced by the raster builder).
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+/// The layer's raster with its pixels made for a map in `crs`.
+public fn renderRaster(_ layer: Layer, _ crs: geodesy.Crs) -> Raster {
+    layer.raster
+}

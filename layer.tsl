@@ -1,0 +1,628 @@
+// cartography: layers, what a map is made of. A vector layer holds
+// features (a shape and a row of values each) with a style and labels; a
+// tile layer, the address of a basemap's tiles; a raster layer, a grid of
+// numbers or a picture. Colors, symbols and styles are here too.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+/// A color: red, green and blue from 0 to 255, and how opaque (0 to 1).
+public struct Rgba {
+    r: Int = 0
+    g: Int = 0
+    b: Int = 0
+    a: Float = 1.0
+
+    fn color() -> Color {
+        .rgba(r, g, b, a)
+    }
+
+    fn withAlpha(_ alpha: Float) -> Rgba {
+        Rgba(r: r, g: g, b: b, a: alpha)
+    }
+
+    /// "#rrggbb".
+    fn hex() -> String {
+        "#" + hexByte(r) + hexByte(g) + hexByte(b)
+    }
+}
+
+fn hexByte(_ n: Int) -> String {
+    let digits = "0123456789abcdef".characters
+    let v = n.clamped(min: 0, max: 255)
+    digits[v / 16] + digits[v % 16]
+}
+
+public fn rgb(_ r: Int, _ g: Int, _ b: Int) -> Rgba {
+    Rgba(r: r, g: g, b: b)
+}
+
+/// A color from "#rrggbb" or "#rgb" (with or without the #), or nil.
+public fn colorFromHex(_ text: String) -> Rgba? {
+    var t = text.trim().lowercase()
+    if t.hasPrefix("#") {
+        t = t.substring(from: 1, to: t.count)
+    }
+    if t.count == 3 {
+        let c = t.characters
+        t = c[0] + c[0] + c[1] + c[1] + c[2] + c[2]
+    }
+    if t.count != 6 {
+        return nil
+    }
+    var parts: [Int] = []
+    let digits = "0123456789abcdef"
+    let chars = t.characters
+    var i = 0
+    while i < 6 {
+        let hi = digits.find(chars[i])
+        let lo = digits.find(chars[i + 1])
+        if hi == nil || lo == nil {
+            return nil
+        }
+        parts.append((hi ?? 0) * 16 + (lo ?? 0))
+        i += 2
+    }
+    Rgba(r: parts[0], g: parts[1], b: parts[2])
+}
+
+public enum MarkerShape { circle, square, triangle, diamond, cross, star, pentagon, hexagon, arrow, x }
+
+/// How a polygon is filled: with its color all over, not at all, or with
+/// lines of it.
+public enum FillStyle { solid, none, horizontal, vertical, forward, backward, cross, diagonalCross }
+
+/// How one feature is drawn. Points use `marker` and `size`; lines `stroke`,
+/// `strokeWidth` and `dash`; polygons `fill`, and the stroke for their edge.
+public struct Symbol {
+    fill: Rgba = Rgba(r: 86, g: 156, b: 214)
+    stroke: Rgba = Rgba(r: 35, g: 35, b: 35)
+    strokeWidth: Float = 1.0
+    /// A marker's width, in points.
+    size: Float = 8.0
+    marker: MarkerShape = MarkerShape.circle
+    /// Lengths of dashes and gaps, in points; empty for a solid line.
+    dash: [Float] = []
+    fillStyle: FillStyle = FillStyle.solid
+    /// A line ends in an arrow head.
+    arrow: Bool = false
+    /// A picture (a PNG or JPEG file) drawn as the marker, in place of a
+    /// shape ("": none).
+    picture: String = ""
+    /// A marker is turned by this many degrees, clockwise.
+    rotation: Float = 0.0
+    /// Lines: markers (of `marker` and `size`) along them, `markerInterval`
+    /// points apart, turned the way the line runs.
+    markerLine: Bool = false
+    markerInterval: Float = 40.0
+    /// Lines: an edge of another color on each side (like a road's).
+    casing: Bool = false
+    casingColor: Rgba = Rgba(r: 255, g: 255, b: 255)
+    casingWidth: Float = 1.5
+}
+
+public enum RendererKind { single, categorized, graduated }
+
+public enum ClassMode { equalInterval, quantile, naturalBreaks, prettyBreaks }
+
+/// One class of a categorized or graduated style.
+public struct StyleClass {
+    label: String = ""
+    /// Categorized: the value features of this class have.
+    value: String = ""
+    /// Graduated: values from `lower` up to `upper` (the last class includes it).
+    lower: Float = 0.0
+    upper: Float = 0.0
+    symbol: Symbol = Symbol()
+    visible: Bool = true
+}
+
+public struct Style {
+    kind: RendererKind = RendererKind.single
+    symbol: Symbol = Symbol()
+    /// The field a categorized or graduated style goes by.
+    field: String = ""
+    classes: [StyleClass] = []
+    mode: ClassMode = ClassMode.equalInterval
+    /// The ramp the classes are colored along ("": colors that are easy to
+    /// tell apart, for categories).
+    ramp: String = ""
+    /// Sizes by a number field: markers (by their area) or lines (by their
+    /// width) from `sizeFrom` to `sizeTo` points, smallest value to largest
+    /// ("": every feature as large as its symbol).
+    sizeField: String = ""
+    sizeFrom: Float = 4.0
+    sizeTo: Float = 24.0
+    /// Markers turned by a field's value (degrees, clockwise), on top of
+    /// the symbol's own turn.
+    rotationField: String = ""
+}
+
+public struct LabelStyle {
+    enabled: Bool = false
+    field: String = ""
+    size: Float = 11.0
+    color: Rgba = Rgba(r: 30, g: 30, b: 30)
+    halo: Bool = true
+    haloColor: Rgba = Rgba(r: 255, g: 255, b: 255)
+    bold: Bool = false
+    /// Labels of lines are turned the way their line runs.
+    followLine: Bool = true
+    /// Labels of lines bend along their lines, letter by letter.
+    curved: Bool = false
+    /// Where a point's label goes, from its marker.
+    placement: LabelPlacement = LabelPlacement.above
+    /// Further from (or nearer to) the feature, in points.
+    distance: Float = 0.0
+    /// Labels show only between these scales (1:N; 0: no limit).
+    minScale: Float = 0.0
+    maxScale: Float = 0.0
+    /// Lines are broken at about this many characters (0: never), and
+    /// wherever the text says so.
+    wrap: Int = 0
+    /// A box behind each label.
+    background: Bool = false
+    backgroundColor: Rgba = Rgba(r: 255, g: 255, b: 255, a: 0.85)
+    /// Polygons: a label wider than its polygon (as the map shows it) isn't
+    /// shown.
+    fitInside: Bool = false
+}
+
+public enum LabelPlacement { above, below, left, right, center }
+
+public enum LayerKind { vector, tiles, raster }
+
+/// A grid of numbers over a rectangle of the map (elevation, a satellite
+/// band, …), or a picture: `bands` rows of `width` × `height` values each,
+/// from the top left corner, row by row.
+public struct Raster {
+    width: Int = 0
+    height: Int = 0
+    bands: [[Float]] = []
+    /// The map coordinates of the outer edges.
+    box: Box = Box()
+    /// The value that means "nothing here" (NaN: none).
+    noData: Float = 0.0 / 0.0
+    /// The smallest and largest value of each band.
+    lows: [Float] = []
+    highs: [Float] = []
+    /// The raster as it's drawn, made by `refreshRaster` when the style or
+    /// the map's CRS changes: pixels (see `writeImage`), their size, and
+    /// the part of the map they cover, in the map's CRS.
+    pixels: [Int] = []
+    pixelWidth: Int = 0
+    pixelHeight: Int = 0
+    pixelBox: Box = Box()
+}
+
+public enum RasterLook { gray, ramp, hillshade, rgb }
+
+public struct RasterStyle {
+    look: RasterLook = RasterLook.gray
+    /// The band shown in gray, with a ramp or as hills; and the bands that
+    /// are the red, green and blue of a color picture (all counted from 0).
+    band: Int = 0
+    redBand: Int = 0
+    greenBand: Int = 1
+    blueBand: Int = 2
+    ramp: String = "Terrain"
+    low: Float = 0.0
+    high: Float = 1.0
+    /// For hillshade: where the sun is (degrees), and how much taller
+    /// than it is the land is drawn.
+    azimuth: Float = 315.0
+    altitude: Float = 45.0
+    exaggeration: Float = 1.0
+    /// The colors come in this many steps (0: smoothly).
+    classes: Int = 0
+    /// Brings out the low values (above 1) or the high ones (below 1).
+    gamma: Float = 1.0
+    /// The colors the other way around.
+    invert: Bool = false
+    /// Colors of your own for the ramp look, from the lowest value to the
+    /// highest (empty: the ramp named in `ramp`).
+    colors: [Rgba] = []
+}
+
+public struct Layer {
+    name: String = ""
+    kind: LayerKind = LayerKind.vector
+    visible: Bool = true
+    /// From 0 (invisible) to 1.
+    opacity: Float = 1.0
+    /// The file it was read from (or the address of its tiles); "" for a
+    /// layer made by the program.
+    source: String = ""
+    crs: geodesy.Crs = geodesy.wgs84Crs()
+
+    // ----- vector layers -----
+    geomKind: GeomKind = GeomKind.point
+    /// Each feature's shape, in the layer's CRS.
+    geoms: [Geometry] = []
+    /// The same shapes in the map's CRS, as they're drawn.
+    shapes: [Geometry] = []
+    /// Each field's values, one for each feature.
+    columns: [Column] = []
+    /// The rows that are selected.
+    selection: [Int] = []
+    style: Style = Style()
+    labels: LabelStyle = LabelStyle()
+    /// For a categorized or graduated style: the class each feature is in
+    /// (-1: none). Worked out by `refresh()`.
+    classOf: [Int] = []
+    /// Where each feature's label goes, as x, y pairs in the map's CRS.
+    anchors: [Float] = []
+    /// With sizes by a field: each feature's marker size or line width
+    /// (points), and the field's smallest and largest values. Worked out by
+    /// `refresh()`, like `turns` (each marker's turn by its field).
+    sizes: [Float] = []
+    sizeRange: [Float] = []
+    turns: [Float] = []
+    /// A grid over the shapes (in the map's CRS), to find the features
+    /// in a part of the map without looking at all of them: each cell lists
+    /// the rows whose boxes touch it; rows too large for the grid are in
+    /// `gridLarge`. Made by `refresh()` when the shapes have changed (see
+    /// `gridMark`); empty for small layers.
+    gridCells: [[Int]] = []
+    gridLarge: [Int] = []
+    gridBox: Box = Box()
+    gridColumns: Int = 0
+    gridRows: Int = 0
+    gridMark: Float = 0.0
+    /// Which way each line runs where its label goes: radians on screen
+    /// (0 is level, positive turns clockwise). Empty unless lines are labeled.
+    anchorAngles: [Float] = []
+    /// What each feature's label says, when it isn't the value of the
+    /// labels' field (empty: the field's values).
+    labelTexts: [String] = []
+    /// The layer is drawn only between these scales (1:N, the larger
+    /// number further out; 0: no limit).
+    minScale: Float = 0.0
+    maxScale: Float = 0.0
+    /// The features that aren't shown or found (empty: none hidden): set
+    /// it to filter a layer, then call `refresh()`.
+    hidden: [Bool] = []
+    /// Changed since it was read or saved.
+    modified: Bool = false
+
+    // ----- tile layers -----
+    /// With {z}, {x} and {y} where a tile's numbers go.
+    urlTemplate: String = ""
+    minZoom: Int = 0
+    maxZoom: Int = 19
+    attribution: String = ""
+
+    // ----- raster layers -----
+    raster: Raster = Raster()
+    rasterStyle: RasterStyle = RasterStyle()
+
+    fn featureCount() -> Int {
+        geoms.count
+    }
+
+    fn fieldNames() -> [String] {
+        columns.map { c in c.name }
+    }
+
+    /// The place of the column called `name` (whatever its capitals), or nil.
+    fn columnIndex(_ name: String) -> Int? {
+        if let i = columns.firstIndex(where: { c in c.name == name }) {
+            return i
+        }
+        let lower = name.lowercase()
+        columns.firstIndex(where: { c in c.name.lowercase() == lower })
+    }
+
+    /// The box around every feature, in the layer's CRS.
+    fn extent() -> Box {
+        var box = Box()
+        for g in geoms {
+            box.include(g.box)
+        }
+        if kind == .raster {
+            box.include(raster.box)
+        }
+        box
+    }
+
+    /// The box around every feature as drawn (in the map's CRS).
+    fn shownExtent() -> Box {
+        var box = Box()
+        if kind == .raster {
+            return raster.pixelBox
+        }
+        for (i, g) in shapes.enumerated() {
+            if !isHidden(i) {
+                box.include(g.box)
+            }
+        }
+        box
+    }
+
+    /// The rows whose shapes may touch a box (in the map's CRS), in
+    /// order: every row of a small layer; for a large one, those the grid
+    /// puts near it (their boxes are still to be checked).
+    fn rowsNear(_ b: Box) -> [Int] {
+        let n = shapes.count
+        if gridColumns == 0 || gridCells.isEmpty || gridBox.empty || b.empty {
+            var all: [Int] = []
+            for i in 0..n {
+                all.append(i)
+            }
+            return all
+        }
+        if !b.intersects(gridBox) {
+            return gridLarge
+        }
+        let cw = gridBox.width() / Float(gridColumns)
+        let ch = gridBox.height() / Float(gridRows)
+        let c0 = Int(floor((b.minX - gridBox.minX) / cw)).clamped(min: 0, max: gridColumns - 1)
+        let c1 = Int(floor((b.maxX - gridBox.minX) / cw)).clamped(min: 0, max: gridColumns - 1)
+        let r0 = Int(floor((b.minY - gridBox.minY) / ch)).clamped(min: 0, max: gridRows - 1)
+        let r1 = Int(floor((b.maxY - gridBox.minY) / ch)).clamped(min: 0, max: gridRows - 1)
+        // Most of the grid: every row (in order) is as quick.
+        if (c1 - c0 + 1) * (r1 - r0 + 1) * 4 > gridColumns * gridRows * 3 {
+            var all: [Int] = []
+            for i in 0..n {
+                all.append(i)
+            }
+            return all
+        }
+        var out: [Int] = []
+        var seen: Set<Int> = []
+        let several = c1 > c0 || r1 > r0
+        for r in r0..(r1 + 1) {
+            for c in c0..(c1 + 1) {
+                for row in gridCells[r * gridColumns + c] {
+                    if !several || !seen.contains(row) {
+                        if several {
+                            seen.insert(row)
+                        }
+                        out.append(row)
+                    }
+                }
+            }
+        }
+        out += gridLarge
+        if several || !gridLarge.isEmpty {
+            out = out.sorted()
+        }
+        out
+    }
+
+    /// Makes the grid of `rowsNear` again, if the shapes changed since it
+    /// was made (their boxes, summed, are the mark of that).
+    fn indexShapes() {
+        let n = shapes.count
+        var mark = Float(n)
+        for g in shapes {
+            if !g.box.empty {
+                mark += g.box.minX * 1.000001 + g.box.maxY * 0.999999 + g.box.maxX - g.box.minY
+            }
+        }
+        if mark == gridMark && (gridColumns > 0 || n < 2000) {
+            return
+        }
+        gridMark = mark
+        gridCells = []
+        gridLarge = []
+        gridColumns = 0
+        gridRows = 0
+        if n < 2000 {
+            return
+        }
+        var box = Box()
+        for g in shapes {
+            box.include(g.box)
+        }
+        if box.empty || !(box.width() > 0.0) || !(box.height() > 0.0) {
+            return
+        }
+        // About four features to a cell, in a grid as square as the shapes allow.
+        let cells = min(max(n / 4, 16), 262144)
+        let aspect = box.width() / box.height()
+        let cols = Int(sqrt(Float(cells) * aspect)).clamped(min: 1, max: 1024)
+        let rows = Int(Float(cells) / Float(cols)).clamped(min: 1, max: 1024)
+        let cw = box.width() / Float(cols)
+        let ch = box.height() / Float(rows)
+        var grid: [[Int]] = []
+        for _ in 0..(cols * rows) {
+            grid.append([])
+        }
+        var large: [Int] = []
+        for (i, g) in shapes.enumerated() {
+            if g.box.empty {
+                continue
+            }
+            let c0 = Int(floor((g.box.minX - box.minX) / cw)).clamped(min: 0, max: cols - 1)
+            let c1 = Int(floor((g.box.maxX - box.minX) / cw)).clamped(min: 0, max: cols - 1)
+            let r0 = Int(floor((g.box.minY - box.minY) / ch)).clamped(min: 0, max: rows - 1)
+            let r1 = Int(floor((g.box.maxY - box.minY) / ch)).clamped(min: 0, max: rows - 1)
+            if (c1 - c0 + 1) * (r1 - r0 + 1) > 64 {
+                large.append(i)
+                continue
+            }
+            for r in r0..(r1 + 1) {
+                for c in c0..(c1 + 1) {
+                    grid[r * cols + c].append(i)
+                }
+            }
+        }
+        gridCells = grid
+        gridLarge = large
+        gridBox = box
+        gridColumns = cols
+        gridRows = rows
+    }
+
+    /// Is a feature left out by the layer's filter?
+    fn isHidden(_ row: Int) -> Bool {
+        row < hidden.count && hidden[row]
+    }
+
+    /// How many features the filter lets through.
+    fn shownCount() -> Int {
+        if hidden.isEmpty {
+            return shapes.count
+        }
+        var n = 0
+        for h in hidden {
+            if !h {
+                n += 1
+            }
+        }
+        n
+    }
+
+    /// Is the layer drawn at a scale of 1:`denominator`?
+    fn showsAt(_ denominator: Float) -> Bool {
+        (minScale <= 0.0 || denominator <= minScale) && (maxScale <= 0.0 || denominator >= maxScale)
+    }
+
+    /// Adds a feature: its shape, and a value for each column (missing ones
+    /// are empty).
+    fn addFeature(_ geom: Geometry, values: [Value] = []) {
+        geoms.append(geom)
+        for i in 0..columns.count {
+            columns[i].append(if i < values.count { values[i] } else { Value.null })
+        }
+        modified = true
+    }
+
+    /// Removes the features at `rows`.
+    fn removeFeatures(_ rows: [Int]) {
+        let gone = rows.sorted().reversed()
+        for r in gone {
+            if r < 0 || r >= geoms.count {
+                continue
+            }
+            geoms.remove(at: r)
+            if r < shapes.count {
+                shapes.remove(at: r)
+            }
+            for i in 0..columns.count {
+                columns[i].remove(at: r)
+            }
+        }
+        selection = []
+        modified = true
+    }
+
+    /// Adds a column of empty values.
+    fn addColumn(name: String, kind: FieldKind) {
+        columns.append(emptyColumn(name: name, kind: kind, count: geoms.count))
+        modified = true
+    }
+
+    /// The values of one feature, in the order of the columns.
+    fn row(_ at: Int) -> [Value] {
+        columns.map { c in c.value(at) }
+    }
+
+    /// Works out what drawing needs from the style and the shapes: each
+    /// feature's class, and where its label goes. Call it after the style,
+    /// the values of the style's field, or the shapes change.
+    fn refresh() {
+        var classes: [Int] = []
+        if style.kind == .categorized || style.kind == .graduated {
+            if let c = columnIndex(style.field) {
+                if style.kind == .categorized {
+                    var places: [String: Int] = [:]
+                    for (i, cl) in style.classes.enumerated() {
+                        places[cl.value] = i
+                    }
+                    for row in 0..shapes.count {
+                        classes.append(places[columns[c].display(row)] ?? -1)
+                    }
+                } else {
+                    for row in 0..shapes.count {
+                        classes.append(classForNumber(style, columns[c].number(row)))
+                    }
+                }
+            }
+        }
+        classOf = classes
+        indexShapes()
+        // Sizes and turns by fields.
+        var sized: [Float] = []
+        var range: [Float] = []
+        if let c = columnIndex(style.sizeField) {
+            var lo = 0.0 / 0.0
+            var hi = 0.0 / 0.0
+            for row in 0..shapes.count {
+                let x = columns[c].number(row)
+                if x.isFinite {
+                    if !(x >= lo) {
+                        lo = x
+                    }
+                    if !(x <= hi) {
+                        hi = x
+                    }
+                }
+            }
+            if lo.isFinite {
+                range = [lo, hi]
+                let (a, b) = (style.sizeFrom, style.sizeTo)
+                for row in 0..shapes.count {
+                    let x = columns[c].number(row)
+                    let t = if x.isFinite && hi > lo { (x - lo) / (hi - lo) } else { 0.0 }
+                    // Markers grow by their area, lines by their width.
+                    sized.append(if geomKind == .point { sqrt(a * a + t * (b * b - a * a)) } else { a + t * (b - a) })
+                }
+            }
+        }
+        sizes = sized
+        sizeRange = range
+        var turned: [Float] = []
+        if let c = columnIndex(style.rotationField) {
+            for row in 0..shapes.count {
+                let x = columns[c].number(row)
+                turned.append(if x.isFinite { x } else { 0.0 })
+            }
+        }
+        turns = turned
+        var spots: [Float] = []
+        if labels.enabled {
+            for s in shapes {
+                let (x, y) = labelAnchor(s)
+                spots.append(x)
+                spots.append(y)
+            }
+        }
+        anchors = spots
+        var angles: [Float] = []
+        if labels.enabled && geomKind == .line {
+            for s in shapes {
+                angles.append(labelAngle(s))
+            }
+        }
+        anchorAngles = angles
+    }
+
+    /// Works out `shapes` from `geoms`, for a map in CRS `to`.
+    fn project(to: geodesy.Crs) {
+        var out: [Geometry] = []
+        if sameCrs(crs, to) {
+            for g in geoms {
+                out.append(oriented(g))
+            }
+        } else {
+            for g in geoms {
+                var parts: [[Float]] = []
+                for part in g.parts {
+                    parts.append(transformCoords(from: crs, to: to, coords: part))
+                }
+                out.append(oriented(makeGeometry(kind: g.kind, parts: parts, polygons: g.polygons)))
+            }
+        }
+        shapes = out
+        refresh()
+    }
+}
+
+/// A new, empty vector layer.
+public fn newVectorLayer(name: String, geomKind: GeomKind, crs: geodesy.Crs) -> Layer {
+    Layer(name: name, crs: crs, geomKind: geomKind)
+}

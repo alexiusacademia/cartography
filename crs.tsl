@@ -1,0 +1,64 @@
+// cartography: coordinate systems. Maps and layers use geodesy's Crs; these
+// are the few things the rest of the library needs on top of it.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+/// Web Mercator (EPSG:3857), the system of web basemaps and a map's
+/// system unless it's given another.
+public fn webMercator() -> geodesy.Crs {
+    geodesy.epsg(3857) ?? geodesy.wgs84Crs()
+}
+
+/// Longitude and latitude on WGS84 (EPSG:4326), the system of GeoJSON, KML
+/// and GPX.
+public fn lonLat() -> geodesy.Crs {
+    geodesy.wgs84Crs()
+}
+
+/// Do two systems put every point in the same place (names aside)?
+public fn sameCrs(_ a: geodesy.Crs, _ b: geodesy.Crs) -> Bool {
+    if a.code != 0 && a.code == b.code {
+        return true
+    }
+    a.proj() == b.proj()
+}
+
+/// Coordinates (x, y, x, y, …) from one system to another.
+public fn transformCoords(from: geodesy.Crs, to: geodesy.Crs, coords: [Float]) -> [Float] {
+    if sameCrs(from, to) {
+        return coords
+    }
+    var out = coords
+    var i = 0
+    while i + 1 < coords.count {
+        let (x, y) = geodesy.transform(coords[i], coords[i + 1], from: from, to: to)
+        out[i] = x
+        out[i + 1] = y
+        i += 2
+    }
+    out
+}
+
+/// A shape with its points taken from one system to another.
+public fn reprojected(_ g: Geometry, from: geodesy.Crs, to: geodesy.Crs) -> Geometry {
+    if sameCrs(from, to) {
+        return g
+    }
+    var parts: [[Float]] = []
+    for part in g.parts {
+        parts.append(transformCoords(from: from, to: to, coords: part))
+    }
+    makeGeometry(kind: g.kind, parts: parts, polygons: g.polygons)
+}
+
+/// How many meters one unit of a system is, at latitude `lat` (degrees
+/// get shorter towards the poles along a parallel).
+public fn metersPerUnit(_ crs: geodesy.Crs, lat: Float) -> Float {
+    if crs.isGeographic() {
+        return 111319.490793 * max(cos(lat * pi / 180.0), 0.01)
+    }
+    crs.toMeter
+}

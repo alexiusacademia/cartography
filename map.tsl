@@ -1,0 +1,464 @@
+// cartography: Map, the whole of a map. Its layers (the first drawn at the
+// bottom), the coordinate system it's drawn in, and where it shows on a
+// Canvas (a viewport.Viewport, so it pans, zooms and turns). It finds the
+// features under a point, says the map's scale, and draws itself.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+import viewport
+
+/// A feature found on the map: the place of its layer in `Map.layers`,
+/// and its row in that layer.
+public struct Hit {
+    layer: Int
+    row: Int
+}
+
+public struct Map {
+    /// What the map is made of, from the bottom up: `layers[0]` is drawn
+    /// first, under the others.
+    layers: [Layer] = []
+    /// The system the map is drawn in. Layers in other systems are
+    /// reprojected into it. Change it with `setCrs`.
+    crs: geodesy.Crs = webMercator()
+    /// Where the map shows on its Canvas, in the map's coordinates (y
+    /// upwards). `vp.scale` is points per map unit.
+    vp: viewport.Viewport = viewport.Viewport(minScale: 0.0000000001, maxScale: 100000000000.0, margin: 24.0)
+    /// What shows where no layer covers the map.
+    background: Color = .white
+    /// Where downloaded tiles are kept ("": a folder `cartography-tiles`
+    /// in the temporary folder).
+    tileFolder: String = ""
+    /// Grows by one at every change to the layers, their styles or the
+    /// map's system: a `Canvas(redraw:)` can use it with `vp`.
+    version: Int = 0
+    /// The tiles asked for and not yet in (their files), so each is
+    /// downloaded once at a time.
+    loading: Set<String> = []
+    /// The text in the bottom right corner, besides the tile layers'
+    /// attributions.
+    credit: String = ""
+
+    // ----- layers -----
+
+    /// Adds a layer on top of the others, reprojected into the map's
+    /// system. The first layer with features also places the map on them.
+    fn add(_ layer: Layer) {
+        layers.append(layer)
+        refresh(layers.count - 1)
+        if vp.content.empty {
+            let b = layerExtent(layers.count - 1)
+            if !b.empty {
+                vp.content = toViewportBox(b)
+            }
+        }
+    }
+
+    /// Inserts a layer at `at` (0: at the bottom).
+    fn insert(_ layer: Layer, at: Int) {
+        let i = at.clamped(min: 0, max: layers.count)
+        layers.insert(layer, at: i)
+        refresh(i)
+    }
+
+    /// Takes a layer off the map.
+    fn remove(at: Int) {
+        if at >= 0 && at < layers.count {
+            layers.remove(at: at)
+            version += 1
+        }
+    }
+
+    /// Moves a layer from one place to another (0: the bottom).
+    fn move(from: Int, to: Int) {
+        if from < 0 || from >= layers.count {
+            return
+        }
+        let layer = layers[from]
+        layers.remove(at: from)
+        layers.insert(layer, at: to.clamped(min: 0, max: layers.count))
+        version += 1
+    }
+
+    /// The place of the first layer called `name`, or nil.
+    fn layerIndex(named: String) -> Int? {
+        layers.firstIndex(where: { l in l.name == named })
+    }
+
+    /// Works a layer out again for drawing: reprojects its shapes and
+    /// classes its features (vector layers), or draws its raster again.
+    /// Call it after changing a layer's shapes, values, style, labels or
+    /// system.
+    fn refresh(_ i: Int) {
+        if i < 0 || i >= layers.count {
+            return
+        }
+        match layers[i].kind {
+            .vector -> layers[i].project(to: crs)
+            .raster -> { layers[i].raster = renderRaster(layers[i], crs) }
+            .tiles -> {}
+        }
+        version += 1
+    }
+
+    /// Works every layer out again (see `refresh`).
+    fn refreshAll() {
+        for i in 0..layers.count {
+            refresh(i)
+        }
+    }
+
+    /// Draws the map in another system, keeping the same place in the
+    /// middle.
+    fn setCrs(_ to: geodesy.Crs) {
+        if sameCrs(crs, to) {
+            return
+        }
+        let (lon, lat) = crs.toWGS84(vp.centerX, vp.centerY)
+        let unit = metersPerUnit(crs, lat: lat)
+        let wasCenterOk = lon.isFinite && lat.isFinite
+        crs = to
+        refreshAll()
+        if wasCenterOk {
+            let (x, y) = to.fromWGS84(lon, lat)
+            let newUnit = metersPerUnit(to, lat: lat)
+            vp.show(x, y, vp.scale * newUnit / unit, vp.angle)
+        }
+        if !vp.content.empty {
+            let b = extent()
+            if !b.empty {
+                vp.content = toViewportBox(b)
+            }
+        }
+    }
+
+    // ----- where things are -----
+
+    /// The box around a layer as the map draws it (in the map's system).
+    fn layerExtent(_ i: Int) -> Box {
+        if i < 0 || i >= layers.count {
+            return Box()
+        }
+        layers[i].shownExtent()
+    }
+
+    /// The box around every layer with features or a raster.
+    fn extent() -> Box {
+        var b = Box()
+        for i in 0..layers.count {
+            b.include(layerExtent(i))
+        }
+        b
+    }
+
+    /// Shows all of a box of the map (in the map's system).
+    fn fit(_ b: Box) {
+        if !b.empty {
+            vp.fit(toViewportBox(b))
+        }
+    }
+
+    /// Shows every layer.
+    fn fitAll() {
+        let b = extent()
+        if !b.empty {
+            vp.content = toViewportBox(b)
+            vp.fit(vp.content)
+        }
+    }
+
+    /// Shows a layer.
+    fn fitLayer(_ i: Int) {
+        fit(layerExtent(i))
+    }
+
+    /// Puts a place (longitude, latitude in degrees) in the middle of the
+    /// map, at a scale of 1:`scale` if it's given.
+    fn centerOn(lon: Float, lat: Float, scale: Float = 0.0) {
+        let (x, y) = crs.fromWGS84(lon, lat)
+        var s = vp.scale
+        if scale > 0.0 {
+            s = pointsPerUnitFor(scale, lat: lat)
+        }
+        vp.show(x, y, s, vp.angle)
+    }
+
+    /// The map point (in the map's system) under a point of the Canvas.
+    fn toMap(_ sx: Float, _ sy: Float) -> (Float, Float) {
+        vp.toWorld(sx, sy)
+    }
+
+    /// The point of the Canvas where a map point (in the map's system) shows.
+    fn toScreen(_ x: Float, _ y: Float) -> (Float, Float) {
+        vp.toScreen(x, y)
+    }
+
+    /// The longitude and latitude (degrees, WGS84) under a point of the Canvas.
+    fn toLonLat(_ sx: Float, _ sy: Float) -> (Float, Float) {
+        let (x, y) = vp.toWorld(sx, sy)
+        crs.toWGS84(x, y)
+    }
+
+    /// The point of the Canvas where a longitude and latitude (degrees,
+    /// WGS84) show.
+    fn fromLonLat(_ lon: Float, _ lat: Float) -> (Float, Float) {
+        let (x, y) = crs.fromWGS84(lon, lat)
+        vp.toScreen(x, y)
+    }
+
+    /// The part of the map that shows (in the map's system).
+    fn visible() -> Box {
+        visibleBox(vp)
+    }
+
+    /// The N of the map's scale 1:N, for a screen of 96 points to the inch,
+    /// measured at the middle of the map.
+    fn scaleDenominator() -> Float {
+        let (_, lat) = crs.toWGS84(vp.centerX, vp.centerY)
+        let meters = metersOnGround(vp.centerX, vp.centerY)
+        let la = if lat.isFinite { lat } else { 0.0 }
+        let perUnit = if meters > 0.0 { meters } else { metersPerUnit(crs, lat: la) }
+        perUnit / vp.scale * 96.0 / 0.0254
+    }
+
+    /// Zooms to a scale of 1:N, about the middle of the map.
+    fn setScaleDenominator(_ n: Float) {
+        let current = scaleDenominator()
+        if n > 0.0 && current > 0.0 && current.isFinite {
+            vp.setScale(vp.scale * current / n)
+        }
+    }
+
+    /// How many meters on the ground one unit of the map's system covers
+    /// at a map point, worked out from a short geodesic.
+    fn metersOnGround(_ x: Float, _ y: Float) -> Float {
+        let d = 1.0 / max(vp.scale, 0.000000000001)
+        let (lon1, lat1) = crs.toWGS84(x - d / 2.0, y)
+        let (lon2, lat2) = crs.toWGS84(x + d / 2.0, y)
+        if !(lon1.isFinite && lat1.isFinite && lon2.isFinite && lat2.isFinite) {
+            return 0.0
+        }
+        if abs(lat1) > 89.9 || abs(lon2 - lon1) > 90.0 {
+            return 0.0
+        }
+        geodesy.distance(lat1, lon1, lat2, lon2) / d
+    }
+
+    /// Points per map unit for a scale of 1:N at latitude `lat`.
+    fn pointsPerUnitFor(_ n: Float, lat: Float) -> Float {
+        var perUnit = metersPerUnit(crs, lat: lat)
+        if crs.code == 3857 || crs.code == 3395 {
+            perUnit = perUnit * max(cos(lat * pi / 180.0), 0.01)
+        }
+        perUnit * 96.0 / 0.0254 / n
+    }
+
+    // ----- finding features -----
+
+    /// The features under a point of the Canvas, within `tolerance` points
+    /// of it: from the top layer down, and in each layer from its last
+    /// feature to its first (the one drawn on top first). Only visible
+    /// vector layers are looked at.
+    fn featuresAt(_ sx: Float, _ sy: Float, tolerance: Float = 4.0) -> [Hit] {
+        let (x, y) = vp.toWorld(sx, sy)
+        let d = tolerance / max(vp.scale, 0.000000000001)
+        let near = boxOf(minX: x - d, minY: y - d, maxX: x + d, maxY: y + d)
+        var out: [Hit] = []
+        var i = layers.count - 1
+        let n = scaleDenominator()
+        while i >= 0 {
+            let layer = layers[i]
+            if layer.kind == .vector && layer.visible && layer.showsAt(n) {
+                let rows = layer.rowsNear(near).reversed()
+                for row in rows {
+                    if layer.isHidden(row) || row >= layer.shapes.count {
+                        continue
+                    }
+                    let shape = layer.shapes[row]
+                    if shape.box.empty || !shape.box.grown(by: d).contains(x, y) {
+                        continue
+                    }
+                    // Points: within the marker; lines and polygon edges:
+                    // within the tolerance; polygons: anywhere inside.
+                    var reach = d
+                    if layer.geomKind == .point {
+                        reach = max(d, layer.style.symbol.size / 2.0 / max(vp.scale, 0.000000000001))
+                    }
+                    if distanceTo(shape, x, y) <= reach {
+                        out.append(Hit(layer: i, row: row))
+                    }
+                }
+            }
+            i -= 1
+        }
+        out
+    }
+
+    /// The top feature under a point of the Canvas, or nil.
+    fn featureAt(_ sx: Float, _ sy: Float, tolerance: Float = 4.0) -> Hit? {
+        let hits = featuresAt(sx, sy, tolerance: tolerance)
+        if hits.isEmpty { nil } else { hits[0] }
+    }
+
+    /// The rows of a layer whose shapes touch a rectangle of the Canvas
+    /// (between two corners).
+    fn featuresIn(layer: Int, _ x1: Float, _ y1: Float, _ x2: Float, _ y2: Float) -> [Int] {
+        if layer < 0 || layer >= layers.count || layers[layer].kind != .vector {
+            return []
+        }
+        var b = Box()
+        for (sx, sy) in [(x1, y1), (x2, y1), (x1, y2), (x2, y2)] {
+            let (x, y) = vp.toWorld(sx, sy)
+            b.add(x, y)
+        }
+        let l = layers[layer]
+        var out: [Int] = []
+        let corners = boxGeometry(b)
+        for row in l.rowsNear(b) {
+            if l.isHidden(row) || row >= l.shapes.count {
+                continue
+            }
+            let shape = l.shapes[row]
+            if !shape.box.intersects(b) {
+                continue
+            }
+            if shapeTouchesBox(shape, b, corners) {
+                out.append(row)
+            }
+        }
+        out
+    }
+
+    /// The values of a feature by field name, as they're shown.
+    fn attributes(_ hit: Hit) -> [(String, String)] {
+        var out: [(String, String)] = []
+        if hit.layer < 0 || hit.layer >= layers.count {
+            return out
+        }
+        let l = layers[hit.layer]
+        for c in l.columns {
+            if hit.row < c.count() {
+                out.append((c.name, c.display(hit.row)))
+            }
+        }
+        out
+    }
+
+    /// Selects rows of a layer (and only them, in that layer).
+    fn select(layer: Int, rows: [Int]) {
+        if layer >= 0 && layer < layers.count {
+            layers[layer].selection = rows
+            version += 1
+        }
+    }
+
+    /// Clears the selection of every layer.
+    fn clearSelection() {
+        for i in 0..layers.count {
+            layers[i].selection = []
+        }
+        version += 1
+    }
+
+    // ----- drawing -----
+
+    /// Draws the map on a Canvas (call `vp.resize` from `.onResize` first,
+    /// or use `MapView`, which does).
+    fn draw(_ g: Graphics) {
+        drawMap(g, self)
+    }
+
+    /// Saves the map as a picture `width` × `height` points (a PNG, or a
+    /// JPEG for a path ending in .jpg), showing what `vp` shows at that
+    /// size. Tiles that aren't downloaded yet are left out.
+    fn savePicture(_ path: String, width: Float, height: Float, scale: Float = 2.0) -> Bool {
+        var copy = self
+        copy.vp.resize(width, height)
+        copy.vp.show(vp.centerX, vp.centerY, vp.scale, vp.angle)
+        renderImage(path: path, width: width, height: height, scale: scale) { g in
+            drawMap(g, copy)
+        }
+    }
+}
+
+/// A cartography Box as a viewport Box.
+public fn toViewportBox(_ b: Box) -> viewport.Box {
+    if b.empty {
+        return viewport.Box()
+    }
+    viewport.box(b.minX, b.minY, b.maxX, b.maxY)
+}
+
+/// A viewport Box as a cartography Box.
+public fn fromViewportBox(_ b: viewport.Box) -> Box {
+    if b.empty {
+        return Box()
+    }
+    boxOf(minX: b.minX, minY: b.minY, maxX: b.maxX, maxY: b.maxY)
+}
+
+/// The part of the map a viewport shows.
+public fn visibleBox(_ vp: viewport.Viewport) -> Box {
+    fromViewportBox(vp.visible())
+}
+
+/// How many map units one point of the Canvas covers.
+public fn unitsPerPoint(_ vp: viewport.Viewport) -> Float {
+    1.0 / max(vp.scale, 0.000000000001)
+}
+
+// Does a shape touch a box (whose polygon is `corners`)?
+private fn shapeTouchesBox(_ shape: Geometry, _ b: Box, _ corners: Geometry) -> Bool {
+    for part in shape.parts {
+        var i = 0
+        while i + 1 < part.count {
+            if b.contains(part[i], part[i + 1]) {
+                return true
+            }
+            i += 2
+        }
+        if shape.kind == .point {
+            continue
+        }
+        // An edge across the box.
+        i = 0
+        while i + 3 < part.count {
+            if segmentCrossesBox(part[i], part[i + 1], part[i + 2], part[i + 3], b) {
+                return true
+            }
+            i += 2
+        }
+    }
+    // The box inside a polygon.
+    shape.kind == .polygon && polygonContains(shape, b.centerX(), b.centerY())
+}
+
+private fn segmentCrossesBox(_ x1: Float, _ y1: Float, _ x2: Float, _ y2: Float, _ b: Box) -> Bool {
+    let edges = [b.minX, b.minY, b.maxX, b.minY, b.maxX, b.maxY, b.minX, b.maxY, b.minX, b.minY]
+    var k = 0
+    while k + 3 < edges.count {
+        if segmentsCross(x1, y1, x2, y2, edges[k], edges[k + 1], edges[k + 2], edges[k + 3]) {
+            return true
+        }
+        k += 2
+    }
+    false
+}
+
+/// Do two segments cross or touch?
+public fn segmentsCross(_ ax: Float, _ ay: Float, _ bx: Float, _ by: Float, _ cx: Float, _ cy: Float, _ dx: Float, _ dy: Float) -> Bool {
+    let d1 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx)
+    let d2 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx)
+    let d3 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    let d4 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax)
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0)) && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0)) {
+        return true
+    }
+    let onC = d1 == 0.0 && min(cx, dx) <= ax && ax <= max(cx, dx) && min(cy, dy) <= ay && ay <= max(cy, dy)
+    let onD = d2 == 0.0 && min(cx, dx) <= bx && bx <= max(cx, dx) && min(cy, dy) <= by && by <= max(cy, dy)
+    let onA = d3 == 0.0 && min(ax, bx) <= cx && cx <= max(ax, bx) && min(ay, by) <= cy && cy <= max(ay, by)
+    let onB = d4 == 0.0 && min(ax, bx) <= dx && dx <= max(ax, bx) && min(ay, by) <= dy && dy <= max(ay, by)
+    onC || onD || onA || onB
+}

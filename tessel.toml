@@ -1,0 +1,16 @@
+# The version of Tessel this project uses: Tessel's commands, editors and
+# the IDE run it with this version, whatever version is installed (and
+# install it the first time). `tessel pin` changes it.
+tessel = "0.24.0"
+
+# What `tessel publish` publishes. Programs use the library by this name:
+# `tessel add cartography`, then `import cartography`.
+[library]
+name = "cartography"
+version = "0.1.0"
+description = "Maps for Canvas views: vector layers with styles, labels and legends, basemap tiles, rasters with color ramps and hillshade, GeoJSON, Shapefile, KML, GPX, CSV, WKT and GeoPackage, in any coordinate system"
+license = "MIT"
+
+[dependencies]
+geodesy = "0.2"
+viewport = "0.1"

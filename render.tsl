@@ -1,0 +1,820 @@
+// cartography: drawing a map. Each layer from the bottom up (tiles,
+// rasters and vector features with their symbols), then what's selected,
+// then labels where there's room, then the tiles' attributions.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import viewport
+
+/// Draws a map on a Canvas: what `Map.draw` does.
+public fn drawMap(_ g: Graphics, _ m: Map) {
+    let v = m.vp
+    g.fillRect(x: 0, y: 0, width: g.width, height: g.height, color: m.background)
+    // (Layers and labels can have scales they show between.)
+    let denominator = m.scaleDenominator()
+    for layer in m.layers {
+        if !layer.visible || !layer.showsAt(denominator) {
+            continue
+        }
+        match layer.kind {
+            .tiles -> drawTileLayer(g, layer, m)
+            .vector -> drawVector(g, layer, v)
+            .raster -> drawPixels(g, layer.raster, v, layer.opacity)
+        }
+    }
+    // What's selected, over everything.
+    for layer in m.layers {
+        if layer.visible && layer.showsAt(denominator) && layer.kind == .vector && !layer.selection.isEmpty {
+            drawSelection(g, layer, v)
+        }
+    }
+    // Labels: the top layer's first, so they win the room.
+    var taken: [Float] = []
+    var i = m.layers.count - 1
+    while i >= 0 {
+        let layer = m.layers[i]
+        let labels = layer.labels
+        let inScale = (labels.minScale <= 0.0 || denominator <= labels.minScale) && (labels.maxScale <= 0.0 || denominator >= labels.maxScale)
+        if layer.visible && layer.showsAt(denominator) && layer.kind == .vector && labels.enabled && inScale {
+            taken = drawLabels(g, layer, v, taken)
+        }
+        i -= 1
+    }
+    drawCredits(g, m)
+}
+
+/// Points the map's coordinates at the canvas: after this, shapes are
+/// given in map coordinates (until `g.restore()`).
+public fn beginMapSpace(_ g: Graphics, _ v: viewport.Viewport) {
+    g.save()
+    v.apply(g)
+}
+
+/// Draws a raster's pixels (made by `renderRaster`, or warped tiles) over
+/// the part of the map they cover.
+public fn drawPixels(_ g: Graphics, _ r: Raster, _ v: viewport.Viewport, _ opacity: Float) {
+    let b = r.pixelBox
+    if b.empty || r.pixelWidth <= 0 || r.pixelHeight <= 0 || r.pixels.count < r.pixelWidth * r.pixelHeight {
+        return
+    }
+    if !b.intersects(visibleBox(v)) {
+        return
+    }
+    g.save()
+    v.apply(g)
+    // (In map space y runs upwards; pictures run downwards from their top.)
+    g.translate(b.minX, b.maxY)
+    g.scale(1.0, -1.0)
+    let _drawn = g.image(pixels: r.pixels, pixelWidth: r.pixelWidth, pixelHeight: r.pixelHeight, x: 0, y: 0, width: b.width(), height: b.height(), opacity: opacity)
+    g.restore()
+}
+
+/// Draws a picture file over a box of the map (tiles, scanned maps).
+public fn drawPicture(_ g: Graphics, _ path: String, _ b: Box, _ v: viewport.Viewport, _ opacity: Float) -> Bool {
+    g.save()
+    v.apply(g)
+    g.translate(b.minX, b.maxY)
+    g.scale(1.0, -1.0)
+    let ok = g.image(path, x: 0, y: 0, width: b.width(), height: b.height(), opacity: opacity)
+    g.restore()
+    ok
+}
+
+// The tile layers' attributions and the map's credit, in the bottom right corner.
+private fn drawCredits(_ g: Graphics, _ m: Map) {
+    var parts: [String] = []
+    for layer in m.layers {
+        if layer.visible && layer.kind == .tiles && !layer.attribution.isEmpty && !parts.contains(layer.attribution) {
+            parts.append(layer.attribution)
+        }
+    }
+    if !m.credit.isEmpty {
+        parts.append(m.credit)
+    }
+    if parts.isEmpty {
+        return
+    }
+    let text = parts.joined(separator: " · ")
+    let w = g.textWidth(text, size: 10)
+    g.fillRect(x: g.width - w - 10, y: g.height - 16, width: w + 10, height: 16, color: .rgba(255, 255, 255, 0.75))
+    g.text(text, x: g.width - 5, y: g.height - 8, size: 10, color: .rgb(60, 60, 60), align: .trailing)
+}
+
+/// Draws point features of class `only` (-1: all) as a picture each: a
+/// PNG, JPEG or SVG file, `size` points across. An SVG's currentColor is
+/// the symbol's fill.
+private fn drawPictures(_ g: Graphics, _ layer: Layer, _ v: viewport.Viewport, _ extent: Box, _ symbol: Symbol, _ only: Int) {
+    let svg = symbol.picture.lowercase().hasSuffix(".svg")
+    var drawn = 0
+    for i in layer.rowsNear(extent) {
+        if (only >= 0 && layer.classOf[i] != only) || layer.isHidden(i) {
+            continue
+        }
+        let shape = layer.shapes[i]
+        if shape.box.empty || !shape.box.intersects(extent) {
+            continue
+        }
+        let size = max(featureSize(layer, i, symbol), 2.0)
+        let turn = featureTurn(layer, i, symbol) * pi / 180.0 - v.angle
+        for part in shape.parts {
+            var k = 0
+            while k + 1 < part.count && drawn < 4000 {
+                let (x, y) = v.toScreen(part[k], part[k + 1])
+                g.save()
+                g.translate(x, y)
+                if turn != 0.0 {
+                    g.rotate(turn)
+                }
+                let ok = if svg {
+                    g.svg(symbol.picture, x: -size / 2.0, y: -size / 2.0, width: size, height: size, color: symbol.fill.withAlpha(symbol.fill.a * layer.opacity).color())
+                } else {
+                    g.image(symbol.picture, x: -size / 2.0, y: -size / 2.0, width: size, height: size, opacity: layer.opacity)
+                }
+                if !ok {
+                    // (No such picture: a plain dot, so the feature still shows.)
+                    g.fillCircle(x: 0, y: 0, radius: 3.0, color: symbol.fill.color())
+                }
+                g.restore()
+                drawn += 1
+                k += 2
+            }
+        }
+    }
+}
+
+/// The symbol a feature is drawn with: its class's, by `layer.classOf`.
+fn symbolCount(_ layer: Layer) -> Int {
+    if layer.style.kind == .single { 1 } else { layer.style.classes.count }
+}
+
+fn drawVector(_ g: Graphics, _ layer: Layer, _ v: viewport.Viewport) {
+    let extent = visibleBox(v)
+    let classes = symbolCount(layer)
+    let single = layer.style.kind == .single || layer.classOf.count != layer.shapes.count
+    for c in 0..max(classes, 1) {
+        var symbol = layer.style.symbol
+        if !single {
+            if !layer.style.classes[c].visible {
+                continue
+            }
+            symbol = layer.style.classes[c].symbol
+        }
+        let only = if single { -1 } else { c }
+        if layer.geomKind == .point && !symbol.picture.isEmpty {
+            drawPictures(g, layer, v, extent, symbol, only)
+            continue
+        }
+        beginMapSpace(g, v)
+        drawFeatures(g, layer, v, extent, symbol, only)
+        g.restore()
+    }
+}
+
+/// The size of a feature's marker (or width of its line), in points: by
+/// the style's size field, or the symbol's own.
+fn featureSize(_ layer: Layer, _ row: Int, _ symbol: Symbol) -> Float {
+    if row < layer.sizes.count && layer.sizes.count == layer.shapes.count {
+        return layer.sizes[row]
+    }
+    if layer.geomKind == .line { symbol.strokeWidth } else { symbol.size }
+}
+
+/// How far a feature's marker is turned: the symbol's turn, and its field's.
+fn featureTurn(_ layer: Layer, _ row: Int, _ symbol: Symbol) -> Float {
+    symbol.rotation + (if row < layer.turns.count && layer.turns.count == layer.shapes.count { layer.turns[row] } else { 0.0 })
+}
+
+/// Draws the features of class `only` (-1: all of them) with one symbol.
+fn drawFeatures(_ g: Graphics, _ layer: Layer, _ v: viewport.Viewport, _ extent: Box, _ symbol: Symbol, _ only: Int) {
+    let fill = symbol.fill.withAlpha(symbol.fill.a * layer.opacity).color()
+    let stroke = symbol.stroke.withAlpha(symbol.stroke.a * layer.opacity).color()
+    let count = layer.shapes.count
+    // Many shapes go into one path; a path is drawn when it has this many points.
+    let batch = 40000
+    var points = 0
+    // The heads of lines that end in an arrow: x, y, x, y, x, y for each.
+    var heads: [Float] = []
+    let head = (5.0 + symbol.strokeWidth * 2.0) * unitsPerPoint(v)
+    // The polygons of a hatched fill, for the lines drawn across them.
+    let hatched = layer.geomKind == .polygon && symbol.fillStyle != .solid && symbol.fillStyle != .none
+    var batchShapes: [Geometry] = []
+    // Lines of their own widths are drawn one by one.
+    let ownWidths = layer.geomKind == .line && layer.sizes.count == count
+    // Markers along lines: x, y and turn of each.
+    var spots: [Float] = []
+    g.beginPath()
+    for i in layer.rowsNear(extent) {
+        if (only >= 0 && layer.classOf[i] != only) || layer.isHidden(i) {
+            continue
+        }
+        let shape = layer.shapes[i]
+        if shape.box.empty || !shape.box.intersects(extent) {
+            continue
+        }
+        match layer.geomKind {
+            .point -> {
+                for part in shape.parts {
+                    var k = 0
+                    let radius = featureSize(layer, i, symbol) * unitsPerPoint(v) / 2.0
+                    let turn = featureTurn(layer, i, symbol)
+                    while k + 1 < part.count {
+                        addMarker(g, symbol.marker, part[k], part[k + 1], radius, turn: turn)
+                        k += 2
+                        points += 8
+                    }
+                }
+            }
+            .line -> {
+                for part in shape.parts {
+                    g.lines(part)
+                    points += part.count / 2
+                    if symbol.arrow && part.count >= 4 {
+                        heads += arrowHead(part, head)
+                    }
+                    if symbol.markerLine && part.count >= 4 {
+                        spots += markerSpots(part, max(symbol.markerInterval, 4.0) * unitsPerPoint(v))
+                    }
+                }
+                if ownWidths {
+                    var own = symbol
+                    own.strokeWidth = layer.sizes[i]
+                    paintPath(g, layer.geomKind, fill, stroke, own, v, extent)
+                    g.beginPath()
+                    points = 0
+                }
+            }
+            .polygon -> {
+                for part in shape.parts {
+                    g.lines(part, closed: true)
+                    points += part.count / 2
+                }
+                if hatched {
+                    batchShapes.append(shape)
+                }
+            }
+        }
+        if points >= batch {
+            paintPath(g, layer.geomKind, fill, stroke, symbol, v, extent)
+            paintHeads(g, heads, stroke)
+            hatch(g, batchShapes, symbol.fillStyle, v, extent, fill)
+            paintSpots(g, spots, symbol, v, layer.opacity)
+            heads = []
+            batchShapes = []
+            spots = []
+            g.beginPath()
+            points = 0
+        }
+    }
+    if points > 0 {
+        paintPath(g, layer.geomKind, fill, stroke, symbol, v, extent)
+    }
+    paintHeads(g, heads, stroke)
+    hatch(g, batchShapes, symbol.fillStyle, v, extent, fill)
+    paintSpots(g, spots, symbol, v, layer.opacity)
+}
+
+/// The triangle at the end of a line (x, y pairs), `size` long.
+fn arrowHead(_ line: [Float], _ size: Float) -> [Float] {
+    let n = line.count
+    let (x1, y1) = (line[n - 2], line[n - 1])
+    // (Back along the line to a point that isn't the end itself.)
+    var k = n - 4
+    while k > 0 && line[k] == x1 && line[k + 1] == y1 {
+        k -= 2
+    }
+    let (dx, dy) = (x1 - line[k], y1 - line[k + 1])
+    let d = sqrt(dx * dx + dy * dy)
+    if !(d > 0.0) {
+        return []
+    }
+    let (ux, uy) = (dx / d, dy / d)
+    let (bx, by) = (x1 - ux * size, y1 - uy * size)
+    [x1 + ux * size * 0.35, y1 + uy * size * 0.35, bx - uy * size * 0.45, by + ux * size * 0.45, bx + uy * size * 0.45, by - ux * size * 0.45]
+}
+
+/// Where markers go along a line (x, y pairs): every `every` map units,
+/// starting half that from its start; x, y and turn (degrees, clockwise)
+/// of each, so a marker's top points the way the line runs.
+fn markerSpots(_ line: [Float], _ every: Float) -> [Float] {
+    var out: [Float] = []
+    var next = every / 2.0
+    var walked = 0.0
+    var i = 0
+    while i + 3 < line.count && out.count < 3000 {
+        let (x1, y1, x2, y2) = (line[i], line[i + 1], line[i + 2], line[i + 3])
+        let d = sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1))
+        if d > 0.0 {
+            let turn = 90.0 - atan2(y2 - y1, x2 - x1) * 180.0 / pi
+            while next <= walked + d {
+                let t = (next - walked) / d
+                out += [x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, turn]
+                next += every
+            }
+            walked += d
+        }
+        i += 2
+    }
+    out
+}
+
+/// The markers along lines, in the symbol's fill (outlined in its color).
+fn paintSpots(_ g: Graphics, _ spots: [Float], _ symbol: Symbol, _ v: viewport.Viewport, _ opacity: Float) {
+    if spots.isEmpty {
+        return
+    }
+    g.beginPath()
+    var k = 0
+    while k + 2 < spots.count {
+        addMarker(g, symbol.marker, spots[k], spots[k + 1], symbol.size * unitsPerPoint(v) / 2.0, turn: spots[k + 2])
+        k += 3
+    }
+    g.fill(symbol.fill.withAlpha(symbol.fill.a * opacity).color())
+    g.stroke(symbol.stroke.withAlpha(symbol.stroke.a * opacity).color(), width: 1.0)
+}
+
+fn paintHeads(_ g: Graphics, _ heads: [Float], _ color: Color) {
+    if heads.isEmpty {
+        return
+    }
+    g.beginPath()
+    var k = 0
+    while k + 5 < heads.count {
+        g.lines(heads.slice(from: k, to: k + 6), closed: true)
+        k += 6
+    }
+    g.fill(color)
+}
+
+/// Fills and outlines the path (in map coordinates) the way a symbol says.
+fn paintPath(_ g: Graphics, _ kind: GeomKind, _ fill: Color, _ stroke: Color, _ symbol: Symbol, _ v: viewport.Viewport, _ extent: Box) {
+    if kind == .line {
+        if symbol.casing && symbol.strokeWidth > 0.0 {
+            // The edges first: a wider line of their color under the line.
+            g.stroke(symbol.casingColor.color(), width: symbol.strokeWidth + 2.0 * symbol.casingWidth)
+        }
+        if symbol.strokeWidth > 0.0 {
+            g.stroke(stroke, width: symbol.strokeWidth, dash: symbol.dash)
+        }
+        return
+    }
+    if symbol.fillStyle == .solid {
+        // (Rings are turned so that holes run against their polygons: shapes
+        // that overlap are filled where either is.)
+        g.fill(fill)
+    }
+    if symbol.strokeWidth > 0.0 {
+        g.stroke(stroke, width: symbol.strokeWidth, dash: symbol.dash)
+    }
+}
+
+/// Draws a hatched fill: lines of the fill's color, 7 points apart, across
+/// each polygon and cut to its inside. (The lines lie on a grid of the
+/// map itself, so they stay put when the map moves.)
+fn hatch(_ g: Graphics, _ shapes: [Geometry], _ style: FillStyle, _ v: viewport.Viewport, _ extent: Box, _ color: Color) {
+    if shapes.isEmpty {
+        return
+    }
+    // The directions of the lines, in degrees from level.
+    let angles: [Float] = match style {
+        .horizontal -> [0.0]
+        .vertical -> [90.0]
+        .forward -> [45.0]
+        .backward -> [-45.0]
+        .cross -> [0.0, 90.0]
+        .diagonalCross -> [45.0, -45.0]
+        _ -> []
+    }
+    let step = 7.0 * unitsPerPoint(v)
+    if angles.isEmpty || !(step > 0.0) {
+        return
+    }
+    g.beginPath()
+    var segments = 0
+    for shape in shapes {
+        let box = shape.box
+        if box.empty {
+            continue
+        }
+        for degrees in angles {
+            let a = degrees * pi / 180.0
+            let (co, si) = (cos(a), sin(a))
+            // In turned coordinates the lines are level: v = k × step.
+            var vLow = 0.0
+            var vHigh = 0.0
+            var first = true
+            for (cx, cy) in [(box.minX, box.minY), (box.maxX, box.minY), (box.minX, box.maxY), (box.maxX, box.maxY)] {
+                let t = -cx * si + cy * co
+                if first || t < vLow {
+                    vLow = t
+                }
+                if first || t > vHigh {
+                    vHigh = t
+                }
+                first = false
+            }
+            var k = ceil(vLow / step)
+            while k * step <= vHigh && segments < 20000 {
+                let level = k * step
+                // Where the line crosses the shape's edges (all rings: holes
+                // cut the line too), in order along it.
+                var crossings: [Float] = []
+                for part in shape.parts {
+                    var i = 0
+                    while i + 3 < part.count {
+                        let (x1, y1, x2, y2) = (part[i], part[i + 1], part[i + 2], part[i + 3])
+                        let (v1, v2) = (-x1 * si + y1 * co, -x2 * si + y2 * co)
+                        if (v1 > level) != (v2 > level) {
+                            let t = (level - v1) / (v2 - v1)
+                            let (x, y) = (x1 + (x2 - x1) * t, y1 + (y2 - y1) * t)
+                            crossings.append(x * co + y * si)
+                        }
+                        i += 2
+                    }
+                }
+                crossings = crossings.sorted()
+                var c = 0
+                while c + 1 < crossings.count {
+                    let (u1, u2) = (crossings[c], crossings[c + 1])
+                    g.moveTo(u1 * co - level * si, u1 * si + level * co)
+                    g.lineTo(u2 * co - level * si, u2 * si + level * co)
+                    segments += 1
+                    c += 2
+                }
+                k += 1.0
+            }
+        }
+    }
+    if segments > 0 {
+        g.stroke(color, width: 1.0)
+    }
+}
+
+/// Adds a marker's outline to the path: centered on (x, y), `r` from its
+/// middle to its edge (in the units the path is in), turned `turn` degrees
+/// clockwise.
+fn addMarker(_ g: Graphics, _ shape: MarkerShape, _ x: Float, _ y: Float, _ r: Float, turn: Float = 0.0) {
+    if shape == .circle {
+        g.circle(x: x, y: y, radius: r)
+        return
+    }
+    // The outline around (0, 0), with y upwards, for a marker of size 1.
+    var pts: [Float] = []
+    match shape {
+        .circle -> {}
+        .square -> { pts = [-1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0] }
+        .triangle -> { pts = [0.0, 1.0, 0.95, -0.75, -0.95, -0.75] }
+        .diamond -> { pts = [0.0, 1.15, 0.85, 0.0, 0.0, -1.15, -0.85, 0.0] }
+        .cross -> {
+            let t = 0.33
+            pts = [-t, 1.0, t, 1.0, t, t, 1.0, t, 1.0, -t, t, -t, t, -1.0, -t, -1.0, -t, -t, -1.0, -t, -1.0, t, -t, t]
+        }
+        .x -> {
+            // A cross, turned an eighth.
+            let t = 0.28
+            let c = 0.7071
+            for (px, py) in [(-t, 1.1), (t, 1.1), (t, t), (1.1, t), (1.1, -t), (t, -t), (t, -1.1), (-t, -1.1), (-t, -t), (-1.1, -t), (-1.1, t), (-t, t)] {
+                pts.append(px * c - py * c)
+                pts.append(px * c + py * c)
+            }
+        }
+        .star -> {
+            for k in 0..10 {
+                let a = pi / 2.0 + Float(k) * pi / 5.0
+                let d = if k % 2 == 0 { 1.15 } else { 0.48 }
+                pts.append(d * cos(a))
+                pts.append(d * sin(a))
+            }
+        }
+        .pentagon -> {
+            for k in 0..5 {
+                let a = pi / 2.0 + Float(k) * 2.0 * pi / 5.0
+                pts.append(1.1 * cos(a))
+                pts.append(1.1 * sin(a))
+            }
+        }
+        .hexagon -> {
+            for k in 0..6 {
+                let a = Float(k) * pi / 3.0
+                pts.append(1.1 * cos(a))
+                pts.append(1.1 * sin(a))
+            }
+        }
+        .arrow -> { pts = [0.0, 1.2, 0.9, 0.1, 0.35, 0.1, 0.35, -1.1, -0.35, -1.1, -0.35, 0.1, -0.9, 0.1] }
+    }
+    let a = -turn * pi / 180.0
+    let (co, si) = (cos(a), sin(a))
+    var out: [Float] = []
+    var k = 0
+    while k + 1 < pts.count {
+        out.append(x + (pts[k] * co - pts[k + 1] * si) * r)
+        out.append(y + (pts[k] * si + pts[k + 1] * co) * r)
+        k += 2
+    }
+    g.lines(out, closed: true)
+}
+
+/// The selected features again, in the color of selections.
+fn drawSelection(_ g: Graphics, _ layer: Layer, _ v: viewport.Viewport) {
+    let extent = visibleBox(v)
+    let fill: Color = .rgba(255, 235, 0, 0.55)
+    let line: Color = .rgb(255, 200, 0)
+    beginMapSpace(g, v)
+    g.beginPath()
+    for row in layer.selection {
+        if row < 0 || row >= layer.shapes.count || layer.isHidden(row) {
+            continue
+        }
+        let shape = layer.shapes[row]
+        if shape.box.empty || !shape.box.intersects(extent) {
+            continue
+        }
+        for part in shape.parts {
+            match layer.geomKind {
+                .point -> {
+                    var k = 0
+                    while k + 1 < part.count {
+                        addMarker(g, layer.style.symbol.marker, part[k], part[k + 1], (layer.style.symbol.size / 2.0 + 1.5) * unitsPerPoint(v), turn: layer.style.symbol.rotation)
+                        k += 2
+                    }
+                }
+                .line -> g.lines(part)
+                .polygon -> g.lines(part, closed: true)
+            }
+        }
+    }
+    match layer.geomKind {
+        .line -> g.stroke(line, width: max(layer.style.symbol.strokeWidth, 1.0) + 2.0)
+        _ -> {
+            g.fill(fill, evenOdd: layer.geomKind == .polygon)
+            g.stroke(.rgb(60, 60, 0), width: 1.0)
+        }
+    }
+    g.restore()
+}
+
+/// A layer's labels, where there's room: one that would cover another (of
+/// this layer, or in `taken`: x0, y0, x1, y1 of each label drawn before) is
+/// left out. Returns `taken` with this layer's labels added.
+fn drawLabels(_ g: Graphics, _ layer: Layer, _ v: viewport.Viewport, _ before: [Float]) -> [Float] {
+    let column = layer.columnIndex(layer.labels.field)
+    let computed = layer.labelTexts.count == layer.shapes.count
+    if (column == nil && !computed) || layer.anchors.count != layer.shapes.count * 2 {
+        return before
+    }
+    let c = column ?? 0
+    let extent = visibleBox(v)
+    let style = layer.labels
+    let ink = style.color.color()
+    let halo = style.haloColor.color()
+    let haloWidth = if style.halo { 1.5 } else { 0.0 }
+    let weight: Weight = if style.bold { .bold } else { .regular }
+    let along = layer.geomKind == .line && style.followLine && layer.anchorAngles.count == layer.shapes.count
+    // Labels bent along their lines.
+    let curved = layer.geomKind == .line && style.curved
+    // The boxes of the labels drawn so far: x0, y0, x1, y1, …
+    var taken = before
+    var drawn = 0
+    // (Curved labels can run onto the map from a feature just off it.)
+    for i in layer.rowsNear(if curved { extent.grown(by: max(extent.width(), extent.height()) * 0.5) } else { extent }) {
+        if drawn >= 600 {
+            break
+        }
+        if layer.isHidden(i) {
+            continue
+        }
+        let (mx, my) = (layer.anchors[2 * i], layer.anchors[2 * i + 1])
+        if !extent.contains(mx, my) && !curved {
+            continue
+        }
+        let text = if computed { layer.labelTexts[i] } else { layer.columns[c].display(i) }
+        if text.isEmpty {
+            continue
+        }
+        let lines = wrapped(text, style.wrap)
+        var widest = 0.0
+        for line in lines {
+            widest = max(widest, g.textWidth(line, size: style.size, weight: weight))
+        }
+        let w = widest + 6.0
+        let lineHeight = style.size * 1.25
+        let h = Float(lines.count) * lineHeight + style.size * 0.15
+        if layer.geomKind == .polygon && style.fitInside && w * unitsPerPoint(v) > layer.shapes[i].box.width() {
+            continue
+        }
+        if curved && lines.count == 1 {
+            // Letter by letter along the line, if the line is long enough.
+            let shape = layer.shapes[i]
+            if shape.box.empty || !shape.box.intersects(extent) {
+                continue
+            }
+            let letters = curvedLetters(g, text, shape, v, style, weight)
+            if letters.count >= 4 {
+                var (x0, y0, x1, y1) = (letters[0], letters[1], letters[0], letters[1])
+                var k = 0
+                while k + 3 < letters.count {
+                    x0 = min(x0, letters[k] - h / 2.0)
+                    x1 = max(x1, letters[k] + h / 2.0)
+                    y0 = min(y0, letters[k + 1] - h / 2.0)
+                    y1 = max(y1, letters[k + 1] + h / 2.0)
+                    k += 3
+                }
+                if x1 < 0.0 || y1 < 0.0 || x0 > v.width || y0 > v.height || !labelRoom(taken, x0, y0, x1, y1) {
+                    continue
+                }
+                taken += [x0, y0, x1, y1]
+                let chars = text.characters
+                k = 0
+                var n = 0
+                while k + 2 < letters.count && n < chars.count {
+                    g.text(chars[n], x: letters[k], y: letters[k + 1], size: style.size, color: ink, weight: weight, align: .center, angle: letters[k + 2], halo: halo, haloWidth: haloWidth)
+                    k += 3
+                    n += 1
+                }
+                drawn += 1
+                continue
+            }
+            if !extent.contains(mx, my) {
+                continue
+            }
+        }
+        let (x, y) = v.toScreen(mx, my)
+        var angle = 0.0
+        var (cx, cy) = (x, y)
+        var align: Alignment = .center
+        if layer.geomKind == .point {
+            // Beside the marker: above it unless the style says where.
+            let gap = layer.style.symbol.size / 2.0 + 2.0 + style.distance
+            match style.placement {
+                .above -> { cy = y - gap - h / 2.0 + 2.0 }
+                .below -> { cy = y + gap + h / 2.0 - 2.0 }
+                .left -> { cx = x - gap - w / 2.0 }
+                .right -> { cx = x + gap + w / 2.0 }
+                .center -> {}
+            }
+        } else if along {
+            // Along its line and just above it; not on a line shorter than the text.
+            let box = layer.shapes[i].box
+            if (box.width() + box.height()) / unitsPerPoint(v) < w * 0.8 {
+                continue
+            }
+            // (On a turned map, turned with it, but never upside down.)
+            angle = layer.anchorAngles[i] - v.angle
+            while angle > pi / 2.0 {
+                angle -= pi
+            }
+            while angle <= -pi / 2.0 {
+                angle += pi
+            }
+            let lift = style.size * 0.75 + layer.style.symbol.strokeWidth / 2.0 + style.distance
+            cx = x + sin(angle) * lift
+            cy = y - cos(angle) * lift
+        }
+        // (The box around the text as it's turned.)
+        let halfW = (abs(cos(angle)) * w + abs(sin(angle)) * h) / 2.0
+        let halfH = (abs(sin(angle)) * w + abs(cos(angle)) * h) / 2.0
+        let (x0, y0, x1, y1) = (cx - halfW, cy - halfH, cx + halfW, cy + halfH)
+        if !labelRoom(taken, x0, y0, x1, y1) {
+            continue
+        }
+        taken += [x0, y0, x1, y1]
+        if style.background {
+            // The box, turned with the text.
+            g.save()
+            g.translate(cx, cy)
+            if angle != 0.0 {
+                g.rotate(angle)
+            }
+            g.fillRect(x: -w / 2.0 - 2.0, y: -h / 2.0, width: w + 4.0, height: h, color: style.backgroundColor.color(), radius: 3.0)
+            g.restore()
+        }
+        // Each line under the one before, centered on the label's spot.
+        for (n, line) in lines.enumerated() {
+            let dy = (Float(n) - Float(lines.count - 1) / 2.0) * lineHeight
+            g.text(line, x: cx - sin(angle) * dy, y: cy + cos(angle) * dy, size: style.size, color: ink, weight: weight, align: align, angle: angle, halo: halo, haloWidth: if style.background { 0.0 } else { haloWidth })
+        }
+        drawn += 1
+    }
+    taken
+}
+
+/// A label's text as lines: broken where it says (a new line), and
+/// between words to keep lines near `width` characters (0: no breaking).
+fn wrapped(_ text: String, _ width: Int) -> [String] {
+    var out: [String] = []
+    for paragraph in text.split("\n") {
+        if width <= 0 || paragraph.count <= width {
+            out.append(paragraph)
+            continue
+        }
+        var line = ""
+        for word in paragraph.split(" ") {
+            if !line.isEmpty && line.count + 1 + word.count > width {
+                out.append(line)
+                line = word
+            } else {
+                line = if line.isEmpty { word } else { line + " " + word }
+            }
+        }
+        if !line.isEmpty {
+            out.append(line)
+        }
+    }
+    if out.isEmpty { [text] } else { out }
+}
+
+/// Is a box clear of the ones taken (x0, y0, x1, y1 each)?
+fn labelRoom(_ taken: [Float], _ x0: Float, _ y0: Float, _ x1: Float, _ y1: Float) -> Bool {
+    var k = 0
+    while k + 3 < taken.count {
+        if x0 < taken[k + 2] && x1 > taken[k] && y0 < taken[k + 3] && y1 > taken[k + 1] {
+            return false
+        }
+        k += 4
+    }
+    true
+}
+
+/// Where the letters of a label go along a line, on screen: x, y and the
+/// angle of each, centered on the line's middle. Empty if the line (its
+/// longest part, as the map shows it) is too short for the text, or bends
+/// too sharply to read.
+fn curvedLetters(_ g: Graphics, _ text: String, _ shape: Geometry, _ v: viewport.Viewport, _ style: LabelStyle, _ weight: Weight) -> [Float] {
+    var longest = 0
+    for (i, p) in shape.parts.enumerated() {
+        if p.count > shape.parts[longest].count {
+            longest = i
+        }
+    }
+    let part = shape.parts[longest]
+    if part.count < 4 {
+        return []
+    }
+    // The line on screen, and how far along it each point is.
+    var xs: [Float] = []
+    var ys: [Float] = []
+    var along: [Float] = [0.0]
+    var k = 0
+    while k + 1 < part.count {
+        let (x, y) = v.toScreen(part[k], part[k + 1])
+        if !xs.isEmpty {
+            let d = sqrt((x - xs[xs.count - 1]) * (x - xs[xs.count - 1]) + (y - ys[ys.count - 1]) * (y - ys[ys.count - 1]))
+            if d < 0.5 {
+                k += 2
+                continue
+            }
+            along.append(along[along.count - 1] + d)
+        }
+        xs.append(x)
+        ys.append(y)
+        k += 2
+    }
+    let total = along[along.count - 1]
+    let chars = text.characters
+    var widths: [Float] = []
+    var width = 0.0
+    for ch in chars {
+        let w = g.textWidth(ch, size: style.size, weight: weight)
+        widths.append(w)
+        width += w
+    }
+    if xs.count < 2 || width > total * 0.9 || width <= 0.0 {
+        return []
+    }
+    // Text reads from left to right: along the line, or against it.
+    let backwards = xs[xs.count - 1] < xs[0]
+    var out: [Float] = []
+    var at = (total - width) / 2.0
+    var seg = 0
+    var before = 0.0
+    for (n, w) in widths.enumerated() {
+        let middle = at + w / 2.0
+        let place = if backwards { total - middle } else { middle }
+        while seg + 2 < xs.count && along[seg + 1] < place {
+            seg += 1
+        }
+        while seg > 0 && along[seg] > place {
+            seg -= 1
+        }
+        let span = along[seg + 1] - along[seg]
+        let t = if span > 0.0 { (place - along[seg]) / span } else { 0.0 }
+        var (dx, dy) = (xs[seg + 1] - xs[seg], ys[seg + 1] - ys[seg])
+        if backwards {
+            dx = -dx
+            dy = -dy
+        }
+        let angle = atan2(dy, dx)
+        // (A turn of more than a quarter between letters can't be read.)
+        if n > 0 && abs(angle - before) > pi / 2.0 && abs(angle - before) < 1.5 * pi {
+            return []
+        }
+        before = angle
+        // On the line's own middle, a touch above so the letters sit on it.
+        let lift = style.size * 0.35 + style.distance
+        out.append(xs[seg] + (xs[seg + 1] - xs[seg]) * t + sin(angle) * lift)
+        out.append(ys[seg] + (ys[seg + 1] - ys[seg]) * t - cos(angle) * lift)
+        out.append(angle)
+        at += w
+    }
+    out
+}
