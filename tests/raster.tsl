@@ -414,9 +414,8 @@ fn rasTTemp(_ name: String) -> String {
 // Writes a layer and reads it back.
 fn rasTRoundTrip(_ layer: cartography.Layer, _ name: String, compression: String, type: String) -> cartography.Layer {
     let path = rasTTemp(name)
-    match cartography.writeGeoTIFF(layer, path, compression: compression, type: type) {
-        .ok(_) -> {}
-        .failure(e) -> fail("{name}: {e.message}")
+    if let e = cartography.writeGeoTIFF(layer, path, compression: compression, type: type) {
+        fail("{name}: {e.message}")
     }
     match cartography.readRaster(path) {
         .ok(back) -> { return back }
@@ -471,9 +470,8 @@ test "GeoTIFF written in whole number types" {
     let u8 = rasTRoundTrip(small, "clamped.tif", compression: "none", type: "uint8")
     expect(u8.raster.bands[0] == [0.0, 3.0, 255.0], "clamped: {u8.raster.bands[0][0]} {u8.raster.bands[0][1]} {u8.raster.bands[0][2]}")
     expect(u8.crs.code == 4326)
-    match cartography.writeGeoTIFF(small, rasTTemp("bad.tif"), type: "complex64") {
-        .ok(_) -> fail("an unknown type writes")
-        .failure(_) -> {}
+    if cartography.writeGeoTIFF(small, rasTTemp("bad.tif"), type: "complex64") == nil {
+        fail("an unknown type writes")
     }
 }
 
@@ -488,9 +486,8 @@ test "GeoTIFF without an EPSG code gets a .prj" {
 test "ASCII grid written and read back" {
     let dem = rasTRead("dem.asc")
     let path = rasTTemp("dem.asc")
-    match cartography.writeAsciiGrid(dem, path) {
-        .ok(_) -> {}
-        .failure(e) -> fail(e.message)
+    if let e = cartography.writeAsciiGrid(dem, path) {
+        fail(e.message)
     }
     match cartography.readAsciiGrid(path) {
         .ok(back) -> {

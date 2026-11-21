@@ -89,7 +89,14 @@ fn rasCellType(_ type: String) -> (Int, Int, Float) {
 /// for decimal types and the type's extreme value (255, -32768, …) for
 /// whole numbers. A raster without a `noData` value and without empty
 /// cells is written without one.
-public fn writeGeoTIFF(_ layer: Layer, _ path: String, compression: String = "deflate", type: String = "float32") -> Result<Bool> {
+public fn writeGeoTIFF(_ layer: Layer, _ path: String, compression: String = "deflate", type: String = "float32") -> Error? {
+    match rasWriteGeoTIFF(layer, path, compression: compression, type: type) {
+        .ok(_) -> nil
+        .failure(e) -> e
+    }
+}
+
+private fn rasWriteGeoTIFF(_ layer: Layer, _ path: String, compression: String, type: String) -> Result<Bool> {
     let r = layer.raster
     let w = r.width
     let h = r.height
@@ -298,7 +305,14 @@ public fn writeGeoTIFF(_ layer: Layer, _ path: String, compression: String = "de
 /// Writes band `band` of a raster layer as an ESRI ASCII grid (`.asc`),
 /// with the CRS beside it as a `.prj` file. Cells without a value get the
 /// raster's `noData` value, or -9999 if it has none.
-public fn writeAsciiGrid(_ layer: Layer, _ path: String, band: Int = 0) -> Result<Bool> {
+public fn writeAsciiGrid(_ layer: Layer, _ path: String, band: Int = 0) -> Error? {
+    match rasWriteAsciiGrid(layer, path, band: band) {
+        .ok(_) -> nil
+        .failure(e) -> e
+    }
+}
+
+private fn rasWriteAsciiGrid(_ layer: Layer, _ path: String, band: Int) -> Result<Bool> {
     let r = layer.raster
     let w = r.width
     let h = r.height
