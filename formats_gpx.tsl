@@ -1,0 +1,219 @@
+// cartography: GPX, the format of GPS receivers: waypoints, routes and
+// tracks.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+/// The lon and lat attributes of a point element, as x and y; NaN for
+/// what's missing.
+fn fmtGpxPoint(_ node: FmtXmlNode) -> (Float, Float) {
+    let none = 0.0 / 0.0
+    (Float(node.attr("lon")) ?? none, Float(node.attr("lat")) ?? none)
+}
+
+/// The points called `name` inside `node`, as lon, lat, lon, lat, …
+fn fmtGpxPoints(_ node: FmtXmlNode, _ name: String) -> [Float] {
+    var out: [Float] = []
+    for p in node.children {
+        if p.name == name {
+            let (x, y) = fmtGpxPoint(p)
+            if x.isFinite && y.isFinite {
+                out.append(x)
+                out.append(y)
+            }
+        }
+    }
+    out
+}
+
+/// Reads GPX text. Waypoints make a layer of points with the columns
+/// name, ele, time, desc and sym. Routes and tracks make layers of lines:
+/// a feature for each, a track's segments being its parts, with the
+/// columns name, desc, kind ("route" or "track") and points (how many).
+/// Each kind there is gives a layer, called `name` with " (waypoints)",
+/// " (routes)" or " (tracks)" after it when there are several. GPX is
+/// always in WGS 84 longitude and latitude.
+public fn readGPX(_ text: String, name: String = "") -> Result<[Layer]> {
+    fmtGpxRead(Data(text: text), label: fmtLabel(name), name: name, source: "")
+}
+
+/// The layers of GPX's bytes (see `readGPX`); `label` names it in errors.
+fn fmtGpxRead(_ d: Data, label: String, name: String, source: String) -> Result<[Layer]> {
+    let path = label
+    var root = FmtXmlNode()
+    match fmtXmlParse(d) {
+        .ok(r) -> { root = r }
+        .failure(e) -> { return .failure(error: fmtReadError(path, e.message)) }
+    }
+    var gpx = FmtXmlNode()
+    if let g = root.child("gpx") {
+        gpx = g
+    } else {
+        return .failure(error: fmtReadError(path, "it isn't GPX (there's no <gpx> in it)"))
+    }
+    var points: [Geometry] = []
+    var names: [String] = []
+    var eles: [String] = []
+    var times: [String] = []
+    var descs: [String] = []
+    var syms: [String] = []
+    // Routes (0) and tracks (1).
+    var lines: [[Geometry]] = [[], []]
+    var lineNames: [[String]] = [[], []]
+    var lineDescs: [[String]] = [[], []]
+    var lineCounts: [[Float]] = [[], []]
+    for node in gpx.children {
+        if node.name == "wpt" {
+            let (x, y) = fmtGpxPoint(node)
+            points.append(if x.isFinite && y.isFinite { pointGeometry(x, y) } else { emptyGeometry(.point) })
+            names.append(node.childText("name"))
+            eles.append(node.childText("ele"))
+            times.append(node.childText("time"))
+            descs.append(node.childText("desc"))
+            syms.append(node.childText("sym"))
+        } else if node.name == "trk" || node.name == "rte" {
+            var parts: [[Float]] = []
+            let k = if node.name == "rte" { 0 } else { 1 }
+            if k == 0 {
+                let coords = fmtGpxPoints(node, "rtept")
+                if !coords.isEmpty {
+                    parts.append(coords)
+                }
+            } else {
+                for seg in node.children {
+                    if seg.name == "trkseg" {
+                        let coords = fmtGpxPoints(seg, "trkpt")
+                        if !coords.isEmpty {
+                            parts.append(coords)
+                        }
+                    }
+                }
+            }
+            let g = if parts.isEmpty { emptyGeometry(.line) } else { multiLineGeometry(parts) }
+            lines[k].append(g)
+            lineNames[k].append(node.childText("name"))
+            lineDescs[k].append(node.childText("desc"))
+            lineCounts[k].append(Float(g.pointCount()))
+        }
+    }
+    var kinds = 0
+    if !points.isEmpty {
+        kinds += 1
+    }
+    for k in 0..2 {
+        if !lines[k].isEmpty {
+            kinds += 1
+        }
+    }
+    let several = kinds > 1
+    var out: [Layer] = []
+    if !points.isEmpty || kinds == 0 {
+        let columns = [textColumn(name: "name", values: names), columnFromTexts(name: "ele", values: eles),
+                       textColumn(name: "time", values: times), textColumn(name: "desc", values: descs),
+                       textColumn(name: "sym", values: syms)]
+        out.append(Layer(name: if several { name + " (waypoints)" } else { name }, source: source, crs: lonLat(),
+                         geomKind: .point, geoms: points, columns: columns,
+                         style: Style(symbol: defaultSymbol(.point, seed: out.count))))
+    }
+    let kindNames = ["route", "track"]
+    let suffixes = [" (routes)", " (tracks)"]
+    for k in 0..2 {
+        if lines[k].isEmpty {
+            continue
+        }
+        let n = lines[k].count
+        var kindValues: [String] = []
+        for _ in 0..n {
+            kindValues.append(kindNames[k])
+        }
+        let columns = [textColumn(name: "name", values: lineNames[k]), textColumn(name: "desc", values: lineDescs[k]),
+                       textColumn(name: "kind", values: kindValues),
+                       numberColumn(name: "points", values: lineCounts[k], whole: true)]
+        out.append(Layer(name: if several { name + suffixes[k] } else { name }, source: source, crs: lonLat(),
+                         geomKind: .line, geoms: lines[k], columns: columns,
+                         style: Style(symbol: defaultSymbol(.line, seed: out.count))))
+    }
+    Result.ok(value: out)
+}
+
+
+/// The value of the layer's column called `name` in row `row`, as an
+/// element called `tag`; "" if there's no such column or value.
+fn fmtGpxElement(_ layer: Layer, _ row: Int, _ name: String, tag: String) -> String {
+    if let c = layer.columnIndex(name) {
+        let v = fmtCell(layer.columns[c], row)
+        if !v.isEmpty {
+            return "<{tag}>{fmtXmlEscaped(v)}</{tag}>"
+        }
+    }
+    ""
+}
+
+/// The points of `coords` as elements called `tag`.
+fn fmtGpxPointsText(_ coords: [Float], tag: String) -> String {
+    var out: [String] = []
+    var i = 0
+    while i + 1 < coords.count {
+        if coords[i].isFinite && coords[i + 1].isFinite {
+            out.append("<{tag} lat=\"{fmtNum(coords[i + 1], 7)}\" lon=\"{fmtNum(coords[i], 7)}\"/>")
+        }
+        i += 2
+    }
+    out.joined()
+}
+
+/// Layers as one GPX document, their shapes brought to WGS 84: all the
+/// waypoints first, then the routes, then the tracks, as GPX wants them.
+/// Points become waypoints, with the columns ele, time, name, desc and sym
+/// if their layer has them. Lines become tracks (a segment for each part),
+/// or routes where a column `kind` says "route" (and the line has one
+/// part); their columns name and desc are written. Other columns have no
+/// place in GPX; nor do polygons, whose layers are left out.
+public fn gpx(_ layers: [Layer]) -> String {
+    var waypoints: [String] = []
+    var routes: [String] = []
+    var tracks: [String] = []
+    for layer in layers {
+        if layer.kind != .vector || layer.geomKind == .polygon {
+            continue
+        }
+        for i in 0..layer.geoms.count {
+            let g = fmtToWgs84(layer.geoms[i], from: layer.crs)
+            if g.isEmpty() {
+                continue
+            }
+            if layer.geomKind == .point {
+                let inside = fmtGpxElement(layer, i, "ele", tag: "ele") + fmtGpxElement(layer, i, "time", tag: "time") +
+                    fmtGpxElement(layer, i, "name", tag: "name") + fmtGpxElement(layer, i, "desc", tag: "desc") +
+                    fmtGpxElement(layer, i, "sym", tag: "sym")
+                for part in g.parts {
+                    var k = 0
+                    while k + 1 < part.count {
+                        if part[k].isFinite && part[k + 1].isFinite {
+                            waypoints.append("<wpt lat=\"{fmtNum(part[k + 1], 7)}\" lon=\"{fmtNum(part[k], 7)}\">{inside}</wpt>\n")
+                        }
+                        k += 2
+                    }
+                }
+                continue
+            }
+            let head = fmtGpxElement(layer, i, "name", tag: "name") + fmtGpxElement(layer, i, "desc", tag: "desc")
+            var route = false
+            if let c = layer.columnIndex("kind") {
+                route = fmtCell(layer.columns[c], i) == "route" && g.parts.count == 1
+            }
+            if route {
+                routes.append("<rte>{head}{fmtGpxPointsText(g.parts[0], tag: "rtept")}</rte>\n")
+            } else {
+                var track = "<trk>{head}"
+                for part in g.parts {
+                    track += "<trkseg>{fmtGpxPointsText(part, tag: "trkpt")}</trkseg>"
+                }
+                tracks.append(track + "</trk>\n")
+            }
+        }
+    }
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+        "<gpx version=\"1.1\" creator=\"cartography\" xmlns=\"http://www.topografix.com/GPX/1/1\">\n" +
+        waypoints.joined() + routes.joined() + tracks.joined() + "</gpx>\n"
+}

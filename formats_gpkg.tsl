@@ -1,0 +1,638 @@
+// cartography: GeoPackage (.gpkg), layers of features kept in an SQLite
+// database, read and written with Tessel's own SQLite.
+//
+// `gpkg_contents` lists the tables that are layers, `gpkg_geometry_columns`
+// says which column of each holds the shapes, `gpkg_spatial_ref_sys` has
+// the CRSs, and each shape is a blob with a short header ("GP", flags, the
+// CRS and perhaps a box) followed by WKB (see formats_wkb.tsl).
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+
+/// The shapes in a GeoPackage geometry blob (the bytes of `d` from `from`
+/// up to `to`): "GP", a version, flags (the byte order of the header, the
+/// size of the box that follows, whether it's empty), the number of the
+/// CRS, the box, then WKB. Nothing if it's empty or isn't such a blob.
+fn fmtGpkgShape(_ d: Data, _ from: Int, _ to: Int) -> FmtShape {
+    if to - from < 8 || d[from] != 71 || d[from + 1] != 80 {
+        return FmtShape()
+    }
+    let flags = d[from + 3]
+    let box = (flags / 2) % 8
+    if box > 4 || (flags / 16) % 2 == 1 {
+        return FmtShape()
+    }
+    let boxSize = if box == 0 { 0 } else if box == 1 { 32 } else if box == 4 { 64 } else { 48 }
+    var reader = FmtWkbReader(d: d, pos: from + 8 + boxSize, end: to)
+    reader.geometry(depth: 0)
+    if reader.failed {
+        return FmtShape()
+    }
+    reader.shape
+}
+
+/// What kind of shapes a geometry type of a GeoPackage has: 0 points,
+/// 1 lines, 2 polygons, -1 any kind (GEOMETRY), -2 if it isn't the name of
+/// a geometry type at all.
+fn fmtGpkgTypeKind(_ name: String) -> Int {
+    var t = name.uppercase().replace(" ", with: "")
+    for _ in 0..2 {
+        if t == "POINT" || t == "MULTIPOINT" {
+            return 0
+        }
+        if t == "LINESTRING" || t == "MULTILINESTRING" || t == "CIRCULARSTRING" || t == "COMPOUNDCURVE" ||
+            t == "MULTICURVE" || t == "CURVE" {
+            return 1
+        }
+        if t == "POLYGON" || t == "MULTIPOLYGON" || t == "CURVEPOLYGON" || t == "MULTISURFACE" || t == "SURFACE" ||
+            t == "POLYHEDRALSURFACE" || t == "TIN" || t == "TRIANGLE" {
+            return 2
+        }
+        if t == "GEOMETRY" || t == "GEOMETRYCOLLECTION" || t == "GEOMCOLLECTION" {
+            return -1
+        }
+        // "POINTZ", "POLYGON ZM": the same without the letters.
+        if t.hasSuffix("ZM") {
+            t = t.substring(from: 0, to: t.count - 2)
+        } else if t.hasSuffix("Z") || t.hasSuffix("M") {
+            t = t.substring(from: 0, to: t.count - 1)
+        } else {
+            break
+        }
+    }
+    -2
+}
+
+fn fmtGpkgHas(_ shape: FmtShape, _ kind: Int) -> Bool {
+    if kind == 0 {
+        return shape.points.count >= 2
+    }
+    if kind == 1 {
+        return !shape.lines.isEmpty
+    }
+    !shape.rings.isEmpty
+}
+
+// ----- a table of features -----
+
+/// Reads a table of features as a layer. `geometry` is the name of the
+
+// ----- reading -----
+
+/// The rows of a query, or none if it fails (a table that isn't there).
+fn fmtGpkgRows(_ db: Database, _ sql: String, _ values: [SqlValue] = []) -> [DatabaseRow] {
+    match db.query(sql, values) {
+        .ok(rows) -> rows
+        .failure(_) -> []
+    }
+}
+
+/// A value of a row as text ("" for null, or a blob).
+fn fmtSqlText(_ v: SqlValue) -> String {
+    match v {
+        .null -> ""
+        .int(n) -> "{n}"
+        .float(x) -> fmtShort(x)
+        .text(s) -> s
+        .data(_) -> ""
+    }
+}
+
+/// A value of a row as a number (NaN for null, a blob, or text that isn't
+/// a number).
+fn fmtSqlNumber(_ v: SqlValue) -> Float {
+    match v {
+        .null -> 0.0 / 0.0
+        .int(n) -> Float(n)
+        .float(x) -> x
+        .text(s) -> Float(s.trim()) ?? (0.0 / 0.0)
+        .data(_) -> 0.0 / 0.0
+    }
+}
+
+/// A name in SQL, in double quotes.
+fn fmtSqlName(_ name: String) -> String {
+    "\"" + name.replace("\"", with: "\"\"") + "\""
+}
+
+/// The CRS numbered `id` in `gpkg_spatial_ref_sys`: the one with its EPSG
+/// code when it's EPSG's, the one its WKT describes otherwise, or WGS 84
+/// when neither is understood.
+fn fmtGpkgCrs(_ db: Database, _ id: Int) -> geodesy.Crs {
+    let rows = fmtGpkgRows(db, "SELECT organization, organization_coordsys_id, definition FROM gpkg_spatial_ref_sys WHERE srs_id = ?", [id])
+    if let r = rows.first {
+        let code = r.int("organization_coordsys_id")
+        if r.text("organization").uppercase() == "EPSG" && code > 0 {
+            if let known = geodesy.epsg(code) {
+                return known
+            }
+        }
+        let wkt = r.text("definition")
+        if wkt.count > 12 {
+            if let described = geodesy.fromWkt(wkt).value() {
+                return described
+            }
+        }
+        return lonLat()
+    }
+    if id > 0 {
+        // Not in the table: such numbers are EPSG codes more often than not.
+        return geodesy.epsg(id) ?? lonLat()
+    }
+    lonLat()
+}
+
+/// Reads a table of features as a layer. `geometry` is the name of the
+/// column with the shapes, `declared` the kind they are said to be (0, 1,
+/// 2, or -1 for any: then the first feature with a shape decides, and
+/// features of other kinds are left out).
+fn fmtGpkgLayer(_ db: Database, table: String, geometry: String, declared: Int, name: String, crs: geodesy.Crs,
+                path: String) -> Result<Layer> {
+    let info = fmtGpkgRows(db, "PRAGMA table_info(" + fmtSqlName(table) + ")")
+    if info.isEmpty {
+        return .failure(error: fmtReadError(path, "its table {table} isn't there"))
+    }
+    // What to do with each column of the table: 0 nothing (blobs),
+    // 1 the shape, 2 a number, 3 text; and which column of the layer it fills.
+    var actions: [Int] = []
+    var slots: [Int] = []
+    var names: [String] = []
+    var numeric: [Bool] = []
+    var whole: [Bool] = []
+    var nums: [[Float]] = []
+    var texts: [[String]] = []
+    var selected: [String] = []
+    let shapeColumn = geometry.lowercase()
+    var shapeFound = false
+    for c in info {
+        let columnName = c.text("name")
+        let type = c.text("type").uppercase()
+        let key = c.int("pk") > 0 && type.contains("INT")
+        var action = 3
+        if !shapeFound && columnName.lowercase() == shapeColumn {
+            action = 1
+            shapeFound = true
+        } else if key {
+            action = 2
+        } else if fmtGpkgTypeKind(type) > -2 || type.contains("BLOB") {
+            action = 0
+        } else if type.contains("INT") || type.contains("BOOL") || type.contains("REAL") || type.contains("FLOA") ||
+            type.contains("DOUB") || type.contains("NUMERIC") || type.contains("DECIMAL") {
+            action = 2
+        }
+        if action == 0 {
+            continue
+        }
+        selected.append(fmtSqlName(columnName))
+        actions.append(action)
+        slots.append(names.count)
+        if action >= 2 {
+            names.append(columnName)
+            numeric.append(action == 2)
+            whole.append(key || type.contains("INT") || type.contains("BOOL"))
+            nums.append([])
+            texts.append([])
+        }
+    }
+    var rows: [DatabaseRow] = []
+    if !selected.isEmpty {
+        match db.query("SELECT " + selected.joined(separator: ", ") + " FROM " + fmtSqlName(table)) {
+            .ok(found) -> { rows = found }
+            .failure(e) -> { return .failure(error: fmtReadError(path, "its table {table} can't be read ({e.message})")) }
+        }
+    }
+    var kind = declared
+    var empty = emptyGeometry(fmtKind(max(kind, 0)))
+    var geoms: [Geometry] = []
+    // The rows of a kind the layer isn't of.
+    var others: [Int] = []
+    for row in rows {
+        var geom = empty
+        for c in 0..actions.count {
+            let v = if c < row.values.count { row.values[c] } else { SqlValue.null }
+            let action = actions[c]
+            let slot = slots[c]
+            if action == 2 {
+                let x = fmtSqlNumber(v)
+                if whole[slot] && x.isFinite && x != floor(x) {
+                    whole[slot] = false
+                }
+                nums[slot].append(x)
+            } else if action == 3 {
+                texts[slot].append(fmtSqlText(v))
+            } else if action == 1 {
+                match v {
+                    .data(blob) -> {
+                        let shape = fmtGpkgShape(blob, 0, blob.count)
+                        if kind < 0 && shape.first >= 0 {
+                            // The first shape of a table of any kind of shapes:
+                            // the features before it had none.
+                            kind = shape.first
+                            empty = emptyGeometry(fmtKind(kind))
+                            for i in 0..geoms.count {
+                                geoms[i] = empty
+                            }
+                            geom = empty
+                        }
+                        if kind >= 0 && fmtGpkgHas(shape, kind) {
+                            geom = shape.geometry(kind)
+                        } else if declared < 0 && shape.first >= 0 {
+                            others.append(geoms.count)
+                        }
+                    }
+                    _ -> {}
+                }
+            }
+        }
+        geoms.append(geom)
+    }
+    var out: [Column] = []
+    for (i, n) in names.enumerated() {
+        if numeric[i] {
+            out.append(Column(name: n, kind: if whole[i] { FieldKind.int } else { FieldKind.float }, nums: nums[i]))
+        } else {
+            out.append(Column(name: n, kind: .text, texts: texts[i]))
+        }
+    }
+    if !others.isEmpty {
+        var keep: [Int] = []
+        var kept: [Geometry] = []
+        var next = 0
+        for i in 0..geoms.count {
+            if next < others.count && others[next] == i {
+                next += 1
+                continue
+            }
+            keep.append(i)
+            kept.append(geoms[i])
+        }
+        geoms = kept
+        out = out.map { c in c.picking(keep) }
+    }
+    let geomKind = fmtKind(max(kind, 0))
+    var layer = Layer(name: name, source: path, crs: crs, geomKind: geomKind, geoms: geoms, columns: out)
+    layer.style.symbol = defaultSymbol(geomKind, seed: 0)
+    Result.ok(value: layer)
+}
+
+/// Reads a GeoPackage (.gpkg): a layer for each of its tables of features,
+/// in the order of `gpkg_contents`, named as that table names them, each
+/// with its CRS and its columns (whole numbers, numbers and text; dates are
+/// text, true and false are 1 and 0; columns of blobs are left out).
+/// Features without a shape have an empty one. Tiles and rasters aren't
+/// read.
+public fn readGeoPackage(_ path: String) -> Result<[Layer]> {
+    if !fileExists(path) {
+        return .failure(error: fmtReadError(path, "there's no such file"))
+    }
+    if isFolder(path) {
+        return .failure(error: fmtReadError(path, "it's a folder"))
+    }
+    let head = readData(path, from: 0, count: 16) ?? Data()
+    if head != Data(text: "SQLite format 3") + Data(bytes: [0]) {
+        return .failure(error: fmtReadError(path, "it isn't a GeoPackage (it isn't an SQLite database)"))
+    }
+    match openDatabase(path) {
+        .ok(db) -> {
+            let read = fmtGpkgRead(db, path)
+            db.close()
+            return read
+        }
+        .failure(e) -> { return .failure(error: fmtReadError(path, e.message)) }
+    }
+}
+
+/// The layers of an open GeoPackage (see `readGeoPackage`).
+fn fmtGpkgRead(_ db: Database, _ path: String) -> Result<[Layer]> {
+    var contents: [DatabaseRow] = []
+    match db.query("SELECT table_name, data_type, identifier, srs_id FROM gpkg_contents") {
+        .ok(rows) -> { contents = rows }
+        .failure(_) -> {
+            return .failure(error: fmtReadError(path, "it's an SQLite database, but not a GeoPackage (it has no gpkg_contents table)"))
+        }
+    }
+    let shapeColumns = fmtGpkgRows(db, "SELECT table_name, column_name, geometry_type_name, srs_id FROM gpkg_geometry_columns")
+    var layers: [Layer] = []
+    var features = 0
+    var pictures = false
+    for r in contents {
+        let type = r.text("data_type").lowercase()
+        if type != "features" {
+            if type == "tiles" || type.contains("coverage") {
+                pictures = true
+            }
+            continue
+        }
+        features += 1
+        let tableName = r.text("table_name")
+        // Which column has the shapes, of what kind, in which CRS.
+        var column = ""
+        var kind = -1
+        var srsId = r.int("srs_id")
+        let wanted = tableName.lowercase()
+        for g in shapeColumns {
+            if g.text("table_name").lowercase() == wanted {
+                column = g.text("column_name")
+                kind = max(-1, fmtGpkgTypeKind(g.text("geometry_type_name")))
+                srsId = g.int("srs_id")
+                break
+            }
+        }
+        if column.isEmpty {
+            // Not listed: the first column declared as a geometry.
+            for c in fmtGpkgRows(db, "PRAGMA table_info(" + fmtSqlName(tableName) + ")") {
+                let k = fmtGpkgTypeKind(c.text("type"))
+                if k > -2 {
+                    column = c.text("name")
+                    kind = k
+                    break
+                }
+            }
+        }
+        let identifier = r.text("identifier")
+        match fmtGpkgLayer(db, table: tableName, geometry: column, declared: kind,
+                           name: if identifier.isEmpty { tableName } else { identifier }, crs: fmtGpkgCrs(db, srsId), path: path) {
+            .ok(layer) -> {
+                var l = layer
+                l.style.symbol = defaultSymbol(l.geomKind, seed: layers.count)
+                layers.append(l)
+            }
+            .failure(_) -> {}
+        }
+    }
+    if layers.isEmpty {
+        var why = ""
+        if features > 0 {
+            why = " that can be read (their tables are missing)"
+        } else if pictures {
+            why = " (it only has tiles or rasters, which aren't read from a GeoPackage)"
+        }
+        return .failure(error: fmtReadError(path, "it has no layers of features{why}"))
+    }
+    Result.ok(value: layers)
+}
+
+// ----- writing -----
+
+/// `name`, or `name` with a number after it, so that it isn't one of
+/// `taken` (whatever the capitals).
+fn fmtGpwUnique(_ name: String, _ taken: [String]) -> String {
+    var candidate = name
+    var n = 2
+    while taken.contains(candidate.lowercase()) {
+        candidate = "{name}_{n}"
+        n += 1
+    }
+    candidate
+}
+
+/// A number with zeros in front, to `width` digits.
+fn fmtGpwDigits(_ n: Int, _ width: Int) -> String {
+    var s = "{n}"
+    while s.count < width {
+        s = "0" + s
+    }
+    s
+}
+
+/// The time now as a GeoPackage writes it: 2026-10-02T13:59:00.000Z.
+fn fmtGpwNow() -> String {
+    let p = dateParts(now(), timeZone: "UTC")
+    fmtGpwDigits(p.year, 4) + "-" + fmtGpwDigits(p.month, 2) + "-" + fmtGpwDigits(p.day, 2) + "T" + fmtGpwDigits(p.hour, 2) + ":" + fmtGpwDigits(p.minute, 2) + ":" + fmtGpwDigits(p.second, 2) + ".000Z"
+}
+
+/// A shape as a GeoPackage keeps it: a short header (with the shape's box,
+/// except for points) and the shape as WKB. `multi` says whether the layer
+/// holds shapes of several parts (then every shape is written as one).
+/// Nil for a shape with nothing in it.
+fn fmtGpwGeometry(_ g: Geometry, srs: Int, multi: Bool) -> Data? {
+    if g.isEmpty() || g.box.empty {
+        return nil
+    }
+    // "GP", version 0, flags (the low byte first; with a box of x and y, or
+    // without), the CRS, the box.
+    let boxed = g.kind != .point || g.pointCount() > 1
+    var out = Data(bytes: [71, 80, 0, if boxed { 3 } else { 1 }])
+    out += Data(bytes: srs.bytes(count: 4))
+    if boxed {
+        out += Data(float64s: [g.box.minX, g.box.maxX, g.box.minY, g.box.maxY])
+    }
+    out += wkb(g, multi: multi)
+    out
+}
+
+/// A spatial reference system's row.
+struct FmtGpwSrs {
+    id: Int = 0
+    name: String = ""
+    organization: String = "NONE"
+    code: Int = 0
+    definition: String = "undefined"
+    description: String = ""
+}
+
+/// The CRS of a layer as a row of `gpkg_spatial_ref_sys`: an EPSG code
+/// keeps its number; another CRS gets one from 100000 on.
+fn fmtGpwSrsOf(_ crs: geodesy.Crs, known: [FmtGpwSrs]) -> FmtGpwSrs {
+    let wkt = crs.wkt()
+    if crs.code > 0 {
+        return FmtGpwSrs(id: crs.code, name: crs.name, organization: "EPSG", code: crs.code, definition: wkt)
+    }
+    var most = 99999
+    for s in known {
+        if s.organization == "NONE" && s.definition == wkt && s.id >= 100000 {
+            return s
+        }
+        most = max(most, s.id)
+    }
+    FmtGpwSrs(id: most + 1, name: if crs.name.isEmpty { "Custom CRS" } else { crs.name }, organization: "NONE", code: most + 1, definition: wkt)
+}
+
+/// A row's value in a column, as SQLite keeps it.
+fn fmtGpwCell(_ c: Column, _ row: Int) -> SqlValue {
+    if row >= c.count() {
+        return .null
+    }
+    if c.kind == .text {
+        let s = c.texts[row]
+        return if s.isEmpty { SqlValue.null } else { SqlValue.text(value: s) }
+    }
+    let x = c.nums[row]
+    if x.isNaN {
+        return .null
+    }
+    // (Whole numbers as whole numbers, as far as a Float holds them exactly.)
+    if c.kind == .int && x == floor(x) && abs(x) < 9007199254740993.0 {
+        return .int(value: Int(x))
+    }
+    SqlValue.float(value: x)
+}
+
+/// Writes vector layers to a new GeoPackage file, each as a table of
+/// features named after the layer (in the layer's CRS). A file that is
+/// there already is replaced. Layers that aren't of features are left out;
+/// with none to write, nothing is written and an error says so. No spatial
+/// index is made (GDAL and QGIS work without one, and can add it).
+public fn writeGeoPackage(_ layers: [Layer], _ path: String) -> Error? {
+    var wanted: [Layer] = []
+    for l in layers {
+        if l.kind == .vector {
+            wanted.append(l)
+        }
+    }
+    if wanted.isEmpty {
+        return fmtWriteError(path, "there are no layers of features to write")
+    }
+    for extra in ["", "-journal", "-wal", "-shm"] {
+        if fileExists(path + extra) {
+            deleteFile(path + extra)
+        }
+    }
+    if fileExists(path) {
+        return fmtWriteError(path, "the file that's there can't be replaced")
+    }
+    if let e = fmtGpwWrite(wanted, path) {
+        deleteFile(path)
+        return fmtWriteError(path, e.message)
+    }
+    nil
+}
+
+fn fmtGpwWrite(_ wanted: [Layer], _ path: String) -> Error? {
+    let db = try openDatabase(path)
+    try db.execute("PRAGMA application_id = 1196444487")
+    try db.execute("PRAGMA user_version = 10200")
+    try db.execute("CREATE TABLE gpkg_spatial_ref_sys (srs_name TEXT NOT NULL,srs_id INTEGER NOT NULL PRIMARY KEY,organization TEXT NOT NULL,organization_coordsys_id INTEGER NOT NULL,definition  TEXT NOT NULL,description TEXT)")
+    try db.execute("CREATE TABLE gpkg_contents (table_name TEXT NOT NULL PRIMARY KEY,data_type TEXT NOT NULL,identifier TEXT UNIQUE,description TEXT DEFAULT '',last_change DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),min_x DOUBLE, min_y DOUBLE,max_x DOUBLE, max_y DOUBLE,srs_id INTEGER,CONSTRAINT fk_gc_r_srs_id FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id))")
+    try db.execute("CREATE TABLE gpkg_geometry_columns (table_name TEXT NOT NULL,column_name TEXT NOT NULL,geometry_type_name TEXT NOT NULL,srs_id INTEGER NOT NULL,z TINYINT NOT NULL,m TINYINT NOT NULL,CONSTRAINT pk_geom_cols PRIMARY KEY (table_name, column_name),CONSTRAINT uk_gc_table_name UNIQUE (table_name),CONSTRAINT fk_gc_tn FOREIGN KEY (table_name) REFERENCES gpkg_contents(table_name),CONSTRAINT fk_gc_srs FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys (srs_id))")
+
+    // The reference systems: the three every GeoPackage has, and the layers'.
+    var systems: [FmtGpwSrs] = [
+        FmtGpwSrs(id: -1, name: "Undefined Cartesian SRS", organization: "NONE", code: -1, definition: "undefined", description: "undefined Cartesian coordinate reference system"),
+        FmtGpwSrs(id: 0, name: "Undefined geographic SRS", organization: "NONE", code: 0, definition: "undefined", description: "undefined geographic coordinate reference system"),
+        FmtGpwSrs(
+            id: 4326, name: "WGS 84 geodetic", organization: "EPSG", code: 4326,
+            definition: "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Latitude\",NORTH],AXIS[\"Longitude\",EAST],AUTHORITY[\"EPSG\",\"4326\"]]",
+            description: "longitude/latitude coordinates in decimal degrees on the WGS 84 spheroid"
+        ),
+    ]
+    var srsOf: [Int] = []
+    for layer in wanted {
+        let system = fmtGpwSrsOf(layer.crs, known: systems)
+        if systems.firstIndex(where: { s in s.id == system.id }) == nil {
+            systems.append(system)
+        }
+        srsOf.append(system.id)
+    }
+    for s in systems {
+        try db.execute("INSERT INTO gpkg_spatial_ref_sys VALUES (?, ?, ?, ?, ?, ?)",
+                       [s.name, s.id, s.organization, s.code, s.definition, if s.description.isEmpty { SqlValue.null } else { SqlValue.text(value: s.description) }])
+    }
+
+    let moment = fmtGpwNow()
+    var tableNames: [String] = []
+    for (n, layer) in wanted.enumerated() {
+        var table = layer.name.trim()
+        let low = table.lowercase()
+        if table.isEmpty || low.hasPrefix("gpkg_") || low.hasPrefix("sqlite_") || low.hasPrefix("rtree_") {
+            table = "layer_" + table
+        }
+        table = fmtGpwUnique(table, tableNames)
+        tableNames.append(table.lowercase())
+        let srs = srsOf[n]
+
+        var multi = false
+        for g in layer.geoms {
+            if g.memberCount() > 1 {
+                multi = true
+                break
+            }
+        }
+        let typeName = match layer.geomKind {
+            .point -> if multi { "MULTIPOINT" } else { "POINT" }
+            .line -> if multi { "MULTILINESTRING" } else { "LINESTRING" }
+            .polygon -> if multi { "MULTIPOLYGON" } else { "POLYGON" }
+        }
+
+        // A column of whole numbers called fid, each larger than the one
+        // before, is the rows' numbers; otherwise they are numbered from 1.
+        var keyColumn = -1
+        var key = "fid"
+        for (c, column) in layer.columns.enumerated() {
+            if column.name.lowercase() == "fid" && column.kind == .int && column.nums.count == layer.geoms.count {
+                var rising = true
+                var before = 0.0
+                for x in column.nums {
+                    if x.isNaN || x != floor(x) || x <= before || x > 9007199254740992.0 {
+                        rising = false
+                        break
+                    }
+                    before = x
+                }
+                if rising {
+                    keyColumn = c
+                    key = column.name
+                }
+            }
+        }
+        var names: [String] = []
+        var written: [String] = []
+        var kept: [Column] = []
+        for (c, column) in layer.columns.enumerated() {
+            if c != keyColumn {
+                let unique = fmtGpwUnique(if column.name.trim().isEmpty { "field" } else { column.name.trim() }, names)
+                names.append(unique.lowercase())
+                written.append(unique)
+                kept.append(column)
+            }
+        }
+        if keyColumn < 0 {
+            key = fmtGpwUnique("fid", names)
+        }
+        let geometry = fmtGpwUnique("geom", names + [key.lowercase()])
+        var sql = "CREATE TABLE {fmtSqlName(table)} ({fmtSqlName(key)} INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, {fmtSqlName(geometry)} {typeName}"
+        var insert = "INSERT INTO {fmtSqlName(table)} ({fmtSqlName(key)}, {fmtSqlName(geometry)}"
+        var marks = "?, ?"
+        for (w, column) in kept.enumerated() {
+            let type = match column.kind {
+                .int -> "INTEGER"
+                .float -> "REAL"
+                .text -> "TEXT"
+            }
+            sql += ", {fmtSqlName(written[w])} {type}"
+            insert += ", {fmtSqlName(written[w])}"
+            marks += ", ?"
+        }
+        try db.execute(sql + ")")
+        insert += ") VALUES (" + marks + ")"
+
+        let box = layer.extent()
+        let corners: [SqlValue] = if box.empty { [SqlValue.null, SqlValue.null, SqlValue.null, SqlValue.null] } else {
+            [SqlValue.float(value: box.minX), SqlValue.float(value: box.minY), SqlValue.float(value: box.maxX), SqlValue.float(value: box.maxY)]
+        }
+        try db.execute("INSERT INTO gpkg_contents (table_name, data_type, identifier, description, last_change, min_x, min_y, max_x, max_y, srs_id) VALUES (?, 'features', ?, '', ?, ?, ?, ?, ?, ?)",
+                       [SqlValue.text(value: table), SqlValue.text(value: table), SqlValue.text(value: moment)] + corners + [SqlValue.int(value: srs)])
+        try db.execute("INSERT INTO gpkg_geometry_columns VALUES (?, ?, ?, ?, 0, 0)", [table, geometry, typeName, srs])
+
+        try db.execute("BEGIN")
+        for row in 0..layer.geoms.count {
+            let id = if keyColumn >= 0 { Int(layer.columns[keyColumn].nums[row]) } else { row + 1 }
+            var values: [SqlValue] = [SqlValue.int(value: id)]
+            if let shape = fmtGpwGeometry(layer.geoms[row], srs: srs, multi: multi) {
+                values.append(SqlValue.data(value: shape))
+            } else {
+                values.append(SqlValue.null)
+            }
+            for column in kept {
+                values.append(fmtGpwCell(column, row))
+            }
+            try db.execute(insert, values)
+        }
+        try db.execute("COMMIT")
+    }
+    db.close()
+    nil
+}

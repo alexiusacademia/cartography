@@ -1,0 +1,96 @@
+// cartography: reading and writing files of map data, choosing the format
+// by what the file's name ends with. The readers and writers of each
+// format are in the other formats_*.tsl files.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+/// The extensions (without their dot, in small letters) of the files
+/// `readLayers` reads.
+public fn readableExtensions() -> [String] {
+    ["geojson", "json", "shp", "dbf", "shx", "prj", "csv", "tsv", "txt", "kml", "gpx", "wkt", "gpkg"]
+}
+
+/// The extensions of the files `writeLayer` writes.
+public fn writableExtensions() -> [String] {
+    ["geojson", "json", "shp", "gpkg", "csv", "kml", "gpx", "wkt"]
+}
+
+/// Reads a file of vector data, of the format its extension says (in
+/// capitals or not): GeoJSON (.geojson, .json), a shapefile (.shp, or the
+/// .dbf, .shx or .prj beside it), delimited text (.csv, .tsv, .txt, with
+/// coordinate columns guessed as `readCSV` does), KML, GPX, a GeoPackage
+/// (.gpkg), or a .wkt file with a geometry on each line. Gives a layer for
+/// each kind of geometry in the file (and for each table of a GeoPackage),
+/// named after the file, with `source` set to its path. The layers keep
+/// the file's CRS; they aren't projected (`Map.add` does that).
+public fn readLayers(_ path: String) -> Result<[Layer]> {
+    let ext = path.fileExtension.lowercase()
+    let name = fmtBaseName(path)
+    if ext == "geojson" || ext == "json" {
+        return fmtGeoJsonFile(path)
+    }
+    if ext == "shp" || ext == "dbf" || ext == "shx" || ext == "prj" {
+        let layer = try readShapefile(path)
+        return .ok(value: [layer])
+    }
+    if ext == "gpkg" {
+        return readGeoPackage(path)
+    }
+    if ext == "kmz" {
+        return .failure(error: fmtReadError(path, "it's a zipped KML: unzip it and open the .kml inside"))
+    }
+    let d = try fmtLoad(path)
+    if ext == "csv" || ext == "tsv" || ext == "txt" || ext == "tab" {
+        return fmtCsvRead(d, label: path, name: name, source: path, prefer: fmtCsvPreferred(path), xField: "",
+                          yField: "", wktField: "", crs: lonLat(), delimiter: "")
+    }
+    if ext == "kml" {
+        return fmtKmlRead(d, label: path, name: name, source: path)
+    }
+    if ext == "gpx" {
+        return fmtGpxRead(d, label: path, name: name, source: path)
+    }
+    if ext == "wkt" {
+        return fmtWktLines(d, label: path, name: name, source: path, crs: lonLat())
+    }
+    Result.failure(error: fmtReadError(path, "it isn't a kind of file cartography reads"))
+}
+
+/// Writes a vector layer to a file of the format its extension says:
+/// .geojson or .json (in WGS 84), .shp (with its .shx, .dbf, .prj and
+/// .cpg), .gpkg, .csv, .kml (in WGS 84), .gpx (in WGS 84; not polygons) or
+/// .wkt. A file that's there is replaced. (`writeGeoPackage` puts several
+/// layers in one .gpkg, `gpx` several in one GPX document.)
+public fn writeLayer(_ layer: Layer, _ path: String) -> Error? {
+    if layer.kind != .vector {
+        return fmtWriteError(path, "only layers of features can be written to such a file")
+    }
+    let ext = path.fileExtension.lowercase()
+    if ext == "shp" {
+        return writeShapefile(layer, path)
+    }
+    if ext == "gpkg" {
+        return writeGeoPackage([layer], path)
+    }
+    if ext == "gpx" && layer.geomKind == .polygon {
+        return fmtWriteError(path, "GPX holds points and lines, not polygons")
+    }
+    var text = ""
+    if ext == "geojson" || ext == "json" {
+        text = geoJSON(layer)
+    } else if ext == "csv" {
+        text = csv(layer)
+    } else if ext == "kml" {
+        text = kml(layer)
+    } else if ext == "gpx" {
+        text = gpx([layer])
+    } else if ext == "wkt" {
+        text = wktLines(layer)
+    } else {
+        return fmtWriteError(path, "it isn't a kind of file cartography writes")
+    }
+    fmtSave(path, text)
+}

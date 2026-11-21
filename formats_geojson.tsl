@@ -1,0 +1,521 @@
+// cartography: GeoJSON (RFC 7946), reading and writing.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+/// Reads GeoJSON with a `FmtJsonCursor`, gathering features as it goes.
+struct FmtGeoJsonReader {
+    p: FmtJsonCursor
+    build: FmtBuilder = FmtBuilder()
+    /// The name in a `crs` member (not in RFC 7946, but in many files).
+    crsName: String = ""
+
+    /// Reads the document: a FeatureCollection, a Feature or a geometry.
+    fn document() {
+        if p.next() != 123 {
+            p.fail("GeoJSON starts with \{")
+            return
+        }
+        let start = p.pos
+        p.pos += 1
+        var type = ""
+        var collection = false
+        var feature = false
+        var geometry = false
+        if p.next() == 125 {
+            p.fail("this object is empty: it isn't GeoJSON")
+            return
+        }
+        while !p.failed() {
+            let key = p.string()
+            p.expect(58, ":")
+            if key == "type" && p.next() == 34 {
+                type = p.string()
+            } else if key == "features" {
+                collection = true
+                features()
+            } else if key == "crs" {
+                crsName = p.findString("name")
+            } else {
+                if key == "geometry" || key == "properties" {
+                    feature = true
+                } else if key == "coordinates" || key == "geometries" {
+                    geometry = true
+                }
+                p.skipValue()
+            }
+            if !p.more(125) {
+                break
+            }
+        }
+        if p.failed() {
+            return
+        }
+        let end = p.pos
+        if !collection {
+            if feature || type == "Feature" {
+                p.pos = start
+                readFeature()
+            } else if geometry {
+                p.pos = start
+                build.add(geometryObject())
+            } else if type == "Topology" {
+                p.pos = start
+                p.fail("this is TopoJSON, which cartography doesn't read")
+            } else {
+                p.pos = start
+                p.fail("this JSON has no features or geometry: it isn't GeoJSON")
+            }
+            if p.failed() {
+                return
+            }
+            p.pos = end
+        }
+        if p.next() >= 0 {
+            p.fail("there's more text after the end of the GeoJSON")
+        }
+    }
+
+    /// The array of a FeatureCollection's `features`.
+    fn features() {
+        if p.null() {
+            return
+        }
+        p.expect(91, "[")
+        if p.next() == 93 {
+            p.pos += 1
+            return
+        }
+        while !p.failed() {
+            if p.next() == 123 {
+                readFeature()
+            } else if !p.null() {
+                p.fail("a feature must be an object")
+            }
+            if !p.more(93) {
+                break
+            }
+        }
+    }
+
+    /// One Feature object, at its `\{`.
+    fn readFeature() {
+        p.pos += 1
+        let row = build.count()
+        var shape = FmtShape()
+        if p.next() == 125 {
+            p.pos += 1
+            build.add(shape)
+            return
+        }
+        while !p.failed() {
+            let key = p.string()
+            p.expect(58, ":")
+            if key == "geometry" {
+                shape = geometryValue()
+            } else if key == "properties" {
+                properties(row)
+            } else {
+                p.skipValue()
+            }
+            if !p.more(125) {
+                break
+            }
+        }
+        if !p.failed() {
+            build.add(shape)
+        }
+    }
+
+    /// The `properties` of the feature in row `row`.
+    fn properties(_ row: Int) {
+        if p.null() {
+            return
+        }
+        p.expect(123, "\{")
+        if p.next() == 125 {
+            p.pos += 1
+            return
+        }
+        while !p.failed() {
+            let key = p.string()
+            p.expect(58, ":")
+            let c = p.next()
+            if c == 34 {
+                build.table.setText(row: row, name: key, text: p.string())
+            } else if c == 45 || (c >= 48 && c <= 57) {
+                let text = p.numberText()
+                let whole = !(text.contains(".") || text.contains("e") || text.contains("E"))
+                build.table.setNumber(row: row, name: key, value: Float(text) ?? (0.0 / 0.0), text: text, whole: whole)
+            } else if c == 110 {
+                if p.null() {
+                    // A null still makes the field exist.
+                    build.table.touch(key)
+                }
+            } else {
+                // true, false, an array or an object: kept as written.
+                build.table.setText(row: row, name: key, text: p.rawValue())
+            }
+            if !p.more(125) {
+                break
+            }
+        }
+    }
+
+    /// A geometry object or null.
+    fn geometryValue() -> FmtShape {
+        if p.null() {
+            return FmtShape()
+        }
+        if p.next() != 123 {
+            p.fail("a geometry must be an object or null")
+            return FmtShape()
+        }
+        geometryObject()
+    }
+
+    /// A geometry object, at its `\{`. The members of a GeometryCollection
+    /// are all put together.
+    fn geometryObject() -> FmtShape {
+        var shape = FmtShape()
+        p.depth += 1
+        if p.depth > 400 {
+            p.fail("geometries are nested too deeply")
+            return shape
+        }
+        p.pos += 1
+        var type = ""
+        var coordsAt = -1
+        if p.next() == 125 {
+            p.pos += 1
+            p.depth -= 1
+            return shape
+        }
+        while !p.failed() {
+            let key = p.string()
+            p.expect(58, ":")
+            if key == "type" && p.next() == 34 {
+                type = p.string()
+            } else if key == "coordinates" {
+                if type.isEmpty {
+                    // The type comes later: come back when it's known.
+                    coordsAt = p.pos
+                    p.skipValue()
+                } else {
+                    shape.merge(coordinates(type))
+                }
+            } else if key == "geometries" {
+                if !p.null() {
+                    p.expect(91, "[")
+                    if p.next() == 93 {
+                        p.pos += 1
+                    } else {
+                        while !p.failed() {
+                            shape.merge(geometryValue())
+                            if !p.more(93) {
+                                break
+                            }
+                        }
+                    }
+                }
+            } else {
+                p.skipValue()
+            }
+            if !p.more(125) {
+                break
+            }
+        }
+        if coordsAt >= 0 && !p.failed() {
+            let end = p.pos
+            p.pos = coordsAt
+            shape.merge(coordinates(type))
+            if !p.failed() {
+                p.pos = end
+            }
+        }
+        p.depth -= 1
+        shape
+    }
+
+    /// The `coordinates` of a geometry of the type named.
+    fn coordinates(_ type: String) -> FmtShape {
+        var shape = FmtShape()
+        if type == "Point" {
+            shape.hint = 0
+            if !p.null() {
+                let xy = positions(single: true)
+                if xy.count >= 2 {
+                    shape.addPoints(xy)
+                }
+            }
+        } else if type == "MultiPoint" {
+            shape.hint = 0
+            if !p.null() {
+                shape.addPoints(positions(single: false))
+            }
+        } else if type == "LineString" {
+            shape.hint = 1
+            if !p.null() {
+                shape.addLine(positions(single: false))
+            }
+        } else if type == "MultiLineString" {
+            shape.hint = 1
+            if !p.null() {
+                for line in rings() {
+                    shape.addLine(line)
+                }
+            }
+        } else if type == "Polygon" {
+            shape.hint = 2
+            if !p.null() {
+                shape.addPolygon(rings())
+            }
+        } else if type == "MultiPolygon" {
+            shape.hint = 2
+            if !p.null() {
+                p.expect(91, "[")
+                if p.next() == 93 {
+                    p.pos += 1
+                } else {
+                    while !p.failed() {
+                        shape.addPolygon(rings())
+                        if !p.more(93) {
+                            break
+                        }
+                    }
+                }
+            }
+        } else if type.isEmpty {
+            p.fail("a geometry has coordinates but no type")
+        } else {
+            p.fail("\"{type}\" isn't a type of geometry")
+        }
+        shape
+    }
+
+    /// A list of positions as x, y, x, y, … (anything after the first two
+    /// numbers of a position is dropped). With `single`, one position.
+    fn positions(single: Bool) -> [Float] {
+        var out: [Float] = []
+        if !single {
+            p.expect(91, "[")
+            if p.next() == 93 {
+                p.pos += 1
+                return out
+            }
+        }
+        while !p.failed() {
+            p.expect(91, "[")
+            if single && p.next() == 93 {
+                p.pos += 1
+                return out
+            }
+            let x = p.number()
+            p.expect(44, "a comma between two coordinates")
+            let y = p.number()
+            while p.next() == 44 {
+                p.pos += 1
+                p.scanNumber()
+            }
+            p.expect(93, "]")
+            out.append(x)
+            out.append(y)
+            if single || !p.more(93) {
+                break
+            }
+        }
+        out
+    }
+
+    /// A list of lists of positions: the rings of a polygon, or the lines
+    /// of a MultiLineString.
+    fn rings() -> [[Float]] {
+        var out: [[Float]] = []
+        p.expect(91, "[")
+        if p.next() == 93 {
+            p.pos += 1
+            return out
+        }
+        while !p.failed() {
+            out.append(positions(single: false))
+            if !p.more(93) {
+                break
+            }
+        }
+        out
+    }
+}
+
+/// The CRS a legacy `crs` member names, WGS 84 if it's unknown.
+fn fmtGeoJsonCrs(_ name: String) -> geodesy.Crs {
+    let t = name.trim()
+    if t.isEmpty || t.uppercase().contains("CRS84") {
+        return lonLat()
+    }
+    if let c = geodesy.crs(t).value() {
+        return c
+    }
+    // "urn:ogc:def:crs:EPSG::3857", "http://www.opengis.net/def/crs/EPSG/0/3857"
+    let d = Data(text: t)
+    var start = d.count
+    while start > 0 && d[start - 1] >= 48 && d[start - 1] <= 57 {
+        start -= 1
+    }
+    if start < d.count && t.uppercase().contains("EPSG") {
+        let code = d.slice(from: start, to: d.count).text ?? ""
+        if let c = geodesy.crs("EPSG:" + code).value() {
+            return c
+        }
+    }
+    lonLat()
+}
+
+fn fmtGeoJsonLayers(_ d: Data, name: String, source: String) -> Result<[Layer]> {
+    var start = 0
+    if d.count >= 3 && d[0] == 239 && d[1] == 187 && d[2] == 191 {
+        start = 3
+    }
+    var reader = FmtGeoJsonReader(p: FmtJsonCursor(d: d, pos: start))
+    reader.document()
+    if reader.p.failed() {
+        return .failure(error: Error(reader.p.err))
+    }
+    let columns = reader.build.table.typedColumns(rows: reader.build.count())
+    Result.ok(value: reader.build.layers(name: name, source: source, crs: fmtGeoJsonCrs(reader.crsName), columns: columns))
+}
+
+/// The layers in GeoJSON text (a FeatureCollection, a Feature or a bare
+/// geometry): one for each kind of geometry it has, called `name` (with
+/// " (points)", " (lines)" or " (polygons)" after it when there are
+/// several). Properties become columns: whole numbers, numbers or text
+/// (objects and lists as their JSON). A legacy `crs` member is followed;
+/// otherwise the coordinates are WGS 84 longitude and latitude.
+public fn readGeoJSON(_ text: String, name: String = "") -> Result<[Layer]> {
+    match fmtGeoJsonLayers(Data(text: text), name: name, source: "") {
+        .ok(layers) -> Result.ok(value: layers)
+        .failure(e) -> Result.failure(error: fmtReadError(fmtLabel(name), e.message))
+    }
+}
+
+/// Reads a GeoJSON file.
+fn fmtGeoJsonFile(_ path: String) -> Result<[Layer]> {
+    let d = try fmtLoad(path)
+    match fmtGeoJsonLayers(d, name: fmtBaseName(path), source: path) {
+        .ok(layers) -> Result.ok(value: layers)
+        .failure(e) -> Result.failure(error: fmtReadError(path, e.message))
+    }
+}
+
+/// "[x,y]" for each point of `coords`, with commas between.
+fn fmtGeoJsonPositions(_ coords: [Float], decimals: Int) -> String {
+    var out: [String] = []
+    var i = 0
+    while i + 1 < coords.count {
+        // A point that couldn't be brought to WGS 84 has no place in JSON.
+        if coords[i].isFinite && coords[i + 1].isFinite {
+            out.append("[" + fmtNum(coords[i], decimals) + "," + fmtNum(coords[i + 1], decimals) + "]")
+        }
+        i += 2
+    }
+    out.joined(separator: ",")
+}
+
+/// One polygon's rings as GeoJSON wants them: the outside counterclockwise,
+/// holes clockwise.
+fn fmtGeoJsonPolygon(_ rings: [[Float]], decimals: Int) -> String {
+    var out: [String] = []
+    for (i, r) in rings.enumerated() {
+        out.append("[" + fmtGeoJsonPositions(fmtOriented(r, counterclockwise: i == 0), decimals: decimals) + "]")
+    }
+    "[" + out.joined(separator: ",") + "]"
+}
+
+/// A geometry (already in WGS 84) as a GeoJSON geometry object, or `null`.
+fn fmtGeoJsonGeometry(_ g: Geometry, decimals: Int) -> String {
+    if g.isEmpty() {
+        return "null"
+    }
+    match g.kind {
+        .point -> {
+            var coords: [Float] = []
+            for p in g.parts {
+                coords.appendAll(p)
+            }
+            if coords.count == 2 {
+                return "\{\"type\":\"Point\",\"coordinates\":" + fmtGeoJsonPositions(coords, decimals: decimals) + "}"
+            }
+            return "\{\"type\":\"MultiPoint\",\"coordinates\":[" + fmtGeoJsonPositions(coords, decimals: decimals) + "]}"
+        }
+        .line -> {
+            if g.parts.count == 1 {
+                return "\{\"type\":\"LineString\",\"coordinates\":[" + fmtGeoJsonPositions(g.parts[0], decimals: decimals) + "]}"
+            }
+            let lines = g.parts.map { p in "[" + fmtGeoJsonPositions(p, decimals: decimals) + "]" }
+            return "\{\"type\":\"MultiLineString\",\"coordinates\":[" + lines.joined(separator: ",") + "]}"
+        }
+        .polygon -> {
+            if g.polygons.count == 1 {
+                return "\{\"type\":\"Polygon\",\"coordinates\":" + fmtGeoJsonPolygon(g.rings(of: 0), decimals: decimals) + "}"
+            }
+            var polygons: [String] = []
+            for i in 0..g.polygons.count {
+                polygons.append(fmtGeoJsonPolygon(g.rings(of: i), decimals: decimals))
+            }
+            return "\{\"type\":\"MultiPolygon\",\"coordinates\":[" + polygons.joined(separator: ",") + "]}"
+        }
+    }
+}
+
+/// The geometry in WGS 84.
+fn fmtToWgs84(_ g: Geometry, from: geodesy.Crs) -> Geometry {
+    let wgs = lonLat()
+    if g.isEmpty() || sameCrs(from, wgs) {
+        return g
+    }
+    var parts: [[Float]] = []
+    for part in g.parts {
+        parts.append(transformCoords(from: from, to: wgs, coords: part))
+    }
+    makeGeometry(kind: g.kind, parts: parts, polygons: g.polygons)
+}
+
+/// The layer as the text of a GeoJSON FeatureCollection, its shapes
+/// brought to WGS 84 longitude and latitude, with up to `decimals` digits
+/// after the point (7 is about a centimeter). Outer rings run
+/// counterclockwise and holes clockwise, as RFC 7946 asks.
+public fn geoJSON(_ layer: Layer, decimals: Int = 7) -> String {
+    var out: [String] = []
+    out.append("\{\n\"type\": \"FeatureCollection\",\n\"name\": " + fmtJsonQuoted(layer.name) + ",\n\"features\": [\n")
+    let keys = layer.columns.map { c in fmtJsonQuoted(c.name) + ":" }
+    let same = sameCrs(layer.crs, lonLat())
+    for i in 0..layer.geoms.count {
+        out.append(if i == 0 { "\{\"type\":\"Feature\",\"properties\":\{" } else { ",\n\{\"type\":\"Feature\",\"properties\":\{" })
+        for (c, col) in layer.columns.enumerated() {
+            if c > 0 {
+                out.append(",")
+            }
+            out.append(keys[c])
+            if col.kind == .text {
+                let s = col.texts[i]
+                out.append(if s.isEmpty { "null" } else { fmtJsonQuoted(s) })
+            } else {
+                let x = col.nums[i]
+                if !x.isFinite {
+                    out.append("null")
+                } else if col.kind == .int {
+                    out.append(fmtShort(round(x)))
+                } else {
+                    out.append("{x}")
+                }
+            }
+        }
+        out.append("},\"geometry\":")
+        let g = if same { layer.geoms[i] } else { fmtToWgs84(layer.geoms[i], from: layer.crs) }
+        out.append(fmtGeoJsonGeometry(g, decimals: decimals))
+        out.append("}")
+    }
+    out.append("\n]\n}\n")
+    out.joined()
+}

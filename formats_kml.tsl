@@ -1,0 +1,357 @@
+// cartography: KML, the format of Google Earth: placemarks in documents
+// and folders.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+/// The numbers of a <coordinates> element: "lon,lat[,alt]" tuples with
+/// space between them, as lon, lat, lon, lat, … (altitudes are dropped).
+/// Space after a comma is forgiven. `spaced` reads "lon lat alt" instead,
+/// one tuple for the whole text (as in <gx:coord>).
+fn fmtKmlCoordinates(_ text: String, spaced: Bool = false) -> [Float] {
+    let d = Data(text: text)
+    var out: [Float] = []
+    let n = d.count
+    var pos = 0
+    while pos < n {
+        // One tuple.
+        var count = 0
+        var x = 0.0
+        var y = 0.0
+        while pos < n {
+            while pos < n && fmtXmlIsSpace(d[pos]) {
+                pos += 1
+            }
+            let start = pos
+            while pos < n && d[pos] != 44 && !fmtXmlIsSpace(d[pos]) {
+                pos += 1
+            }
+            if pos > start {
+                let v = fmtFloatAt(d, start, pos)
+                if count == 0 {
+                    x = v
+                } else if count == 1 {
+                    y = v
+                }
+                count += 1
+            }
+            // A comma (perhaps after space) means the tuple goes on.
+            var ahead = pos
+            while ahead < n && fmtXmlIsSpace(d[ahead]) {
+                ahead += 1
+            }
+            if ahead < n && d[ahead] == 44 {
+                pos = ahead + 1
+            } else if !spaced || ahead >= n {
+                break
+            }
+        }
+        if count >= 2 && x.isFinite && y.isFinite {
+            out.append(x)
+            out.append(y)
+        }
+    }
+    out
+}
+
+/// The coordinates of the LinearRings inside a boundary element.
+fn fmtKmlRings(_ boundary: FmtXmlNode) -> [[Float]] {
+    var out: [[Float]] = []
+    for ring in boundary.children {
+        if ring.name == "LinearRing" {
+            out.append(fmtKmlCoordinates(ring.childText("coordinates")))
+        }
+    }
+    out
+}
+
+/// The shapes of a geometry element (Point, LineString, LinearRing,
+/// Polygon, MultiGeometry, and the tracks of the gx extension); nothing
+/// for any other element.
+fn fmtKmlShape(_ node: FmtXmlNode) -> FmtShape {
+    var shape = FmtShape()
+    if node.name == "Point" {
+        shape.hint = 0
+        let coords = fmtKmlCoordinates(node.childText("coordinates"))
+        if coords.count >= 2 {
+            shape.addPoints(coords)
+        }
+    } else if node.name == "LineString" || node.name == "LinearRing" {
+        shape.hint = 1
+        shape.addLine(fmtKmlCoordinates(node.childText("coordinates")))
+    } else if node.name == "Polygon" {
+        shape.hint = 2
+        var rings: [[Float]] = []
+        for b in node.children {
+            if b.name == "outerBoundaryIs" {
+                // The outer ring goes first, wherever it's written.
+                var all = fmtKmlRings(b)
+                all.appendAll(rings)
+                rings = all
+            } else if b.name == "innerBoundaryIs" {
+                rings.appendAll(fmtKmlRings(b))
+            }
+        }
+        shape.addPolygon(rings)
+    } else if node.name == "MultiGeometry" || node.name == "MultiTrack" {
+        for c in node.children {
+            shape.merge(fmtKmlShape(c))
+        }
+    } else if node.name == "Track" {
+        shape.hint = 1
+        var coords: [Float] = []
+        for c in node.children {
+            if c.name == "coord" {
+                coords.appendAll(fmtKmlCoordinates(c.text, spaced: true))
+            }
+        }
+        shape.addLine(coords)
+    }
+    shape
+}
+
+/// Gathers the placemarks of a KML document.
+struct FmtKmlReader {
+    build: FmtBuilder = FmtBuilder()
+    /// The types the document's Schemas give to fields: "string", "int",
+    /// "double", …
+    types: [String: String] = [:]
+
+    /// Looks for placemarks in everything inside `node`, however deep.
+    fn walk(_ node: FmtXmlNode) {
+        for child in node.children {
+            if child.name == "Placemark" {
+                placemark(child)
+            } else if child.name == "Schema" {
+                for field in child.children {
+                    if field.name == "SimpleField" && !field.attr("name").isEmpty {
+                        build.table.touch(field.attr("name"))
+                        types[field.attr("name")] = field.attr("type").lowercase()
+                    }
+                }
+            } else if !child.children.isEmpty {
+                walk(child)
+            }
+        }
+    }
+
+    fn placemark(_ node: FmtXmlNode) {
+        let row = build.count()
+        var shape = FmtShape()
+        for child in node.children {
+            if child.name == "name" || child.name == "description" {
+                build.table.setText(row: row, name: child.name, text: child.text.trim())
+            } else if child.name == "ExtendedData" {
+                for item in child.children {
+                    if item.name == "Data" {
+                        build.table.setText(row: row, name: item.attr("name"), text: item.childText("value"))
+                    } else if item.name == "SchemaData" {
+                        for simple in item.children {
+                            if simple.name == "SimpleData" {
+                                build.table.setText(row: row, name: simple.attr("name"), text: simple.text.trim())
+                            }
+                        }
+                    }
+                }
+            } else {
+                shape.merge(fmtKmlShape(child))
+            }
+        }
+        build.add(shape)
+    }
+}
+
+/// The column as the type a Schema gives it (as it is if the type is ""
+/// or the values don't fit it).
+fn fmtKmlTyped(_ col: Column, texts: [String], type: String) -> Column {
+    if type.isEmpty {
+        return col
+    }
+    let whole = type == "int" || type == "uint" || type == "short" || type == "ushort"
+    if !whole && type != "float" && type != "double" {
+        return Column(name: col.name, kind: .text, texts: texts)
+    }
+    var nums: [Float] = []
+    for t in texts {
+        if t.trim().isEmpty {
+            nums.append(0.0 / 0.0)
+        } else if let x = Float(t) {
+            nums.append(x)
+        } else {
+            return col
+        }
+    }
+    Column(name: col.name, kind: if whole { FieldKind.int } else { FieldKind.float }, nums: nums)
+}
+
+/// Reads KML text: every Placemark in it, in whatever Document or Folder,
+/// with the columns `name` and `description` and one for each value of
+/// its ExtendedData (of the kind a Schema says, or guessed from the
+/// values); a layer for each kind of shape there is, called `name`. KML is
+/// always in WGS 84 longitude and latitude (altitudes are dropped).
+public fn readKML(_ text: String, name: String = "") -> Result<[Layer]> {
+    fmtKmlRead(Data(text: text), label: fmtLabel(name), name: name, source: "")
+}
+
+/// The layers of KML's bytes (see `readKML`); `label` names it in errors.
+fn fmtKmlRead(_ d: Data, label: String, name: String, source: String) -> Result<[Layer]> {
+    let path = label
+    match fmtXmlParse(d) {
+        .ok(root) -> {
+            var reader = FmtKmlReader()
+            reader.build.table.touch("name")
+            reader.build.table.touch("description")
+            reader.walk(root)
+            let rows = reader.build.count()
+            if rows == 0 && root.child("kml") == nil {
+                return .failure(error: fmtReadError(path, "it isn't KML (there's no <kml> in it)"))
+            }
+            var columns = reader.build.table.guessedColumns(rows: rows)
+            for c in 0..columns.count {
+                // Names and descriptions are text, even when they're all
+                // digits; a Schema says what its fields are.
+                let type = if c < 2 { "string" } else { reader.types[columns[c].name] ?? "" }
+                columns[c] = fmtKmlTyped(columns[c], texts: reader.build.table.cols[c].texts, type: type)
+            }
+            return .ok(value: reader.build.layers(name: name, source: source, crs: lonLat(), columns: columns))
+        }
+        .failure(e) -> {
+            return .failure(error: fmtReadError(path, e.message))
+        }
+    }
+}
+
+/// "lon,lat lon,lat …"
+fn fmtKmlCoordinateText(_ coords: [Float]) -> String {
+    var out: [String] = []
+    var i = 0
+    while i + 1 < coords.count {
+        if coords[i].isFinite && coords[i + 1].isFinite {
+            out.append(fmtNum(coords[i], 7) + "," + fmtNum(coords[i + 1], 7))
+        }
+        i += 2
+    }
+    out.joined(separator: " ")
+}
+
+fn fmtKmlPolygonText(_ rings: [[Float]]) -> String {
+    var out = "<Polygon>"
+    for (i, r) in rings.enumerated() {
+        let tag = if i == 0 { "outerBoundaryIs" } else { "innerBoundaryIs" }
+        // The outside runs counterclockwise in KML.
+        let ring = fmtOriented(r, counterclockwise: i == 0)
+        out += "<{tag}><LinearRing><coordinates>{fmtKmlCoordinateText(ring)}</coordinates></LinearRing></{tag}>"
+    }
+    out + "</Polygon>"
+}
+
+/// A geometry (in WGS 84) as KML, "" for an empty one.
+fn fmtKmlGeometryText(_ g: Geometry) -> String {
+    if g.isEmpty() {
+        return ""
+    }
+    var members: [String] = []
+    match g.kind {
+        .point -> {
+            for part in g.parts {
+                var i = 0
+                while i + 1 < part.count {
+                    members.append("<Point><coordinates>{fmtKmlCoordinateText([part[i], part[i + 1]])}</coordinates></Point>")
+                    i += 2
+                }
+            }
+        }
+        .line -> {
+            for part in g.parts {
+                members.append("<LineString><coordinates>{fmtKmlCoordinateText(part)}</coordinates></LineString>")
+            }
+        }
+        .polygon -> {
+            for i in 0..g.polygons.count {
+                members.append(fmtKmlPolygonText(g.rings(of: i)))
+            }
+        }
+    }
+    if members.count == 1 {
+        return members[0]
+    }
+    "<MultiGeometry>" + members.joined() + "</MultiGeometry>"
+}
+
+/// The value of a column as it's written in a text file: nothing for no
+/// value, whole numbers without a point.
+fn fmtCell(_ col: Column, _ row: Int) -> String {
+    if col.kind == .text {
+        return col.texts[row]
+    }
+    let x = col.nums[row]
+    if !x.isFinite {
+        return ""
+    }
+    if col.kind == .int { fmtShort(round(x)) } else { "{x}" }
+}
+
+/// The layer as KML, its shapes brought to WGS 84: a Placemark for each
+/// feature, named by the column called `name` (whatever its capitals) if
+/// there is one, with a column `description` as its description and the
+/// other columns as ExtendedData, described by a Schema.
+public fn kml(_ layer: Layer) -> String {
+    var out: [String] = []
+    out.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<kml xmlns=\"http://www.opengis.net/kml/2.2\">\n<Document>\n")
+    out.append("<name>{fmtXmlEscaped(layer.name)}</name>\n")
+    let nameAt = layer.columnIndex("name") ?? -1
+    let descriptionAt = layer.columnIndex("description") ?? -1
+    var keys: [String] = []
+    var schema: [String] = []
+    for (c, col) in layer.columns.enumerated() {
+        keys.append("<SimpleData name=\"{fmtXmlEscaped(col.name)}\">")
+        if c != nameAt && c != descriptionAt {
+            let type = if col.kind == .int { "int" } else if col.kind == .float { "double" } else { "string" }
+            schema.append("<SimpleField name=\"{fmtXmlEscaped(col.name)}\" type=\"{type}\"/>")
+        }
+    }
+    if !schema.isEmpty {
+        out.append("<Schema name=\"fields\" id=\"fields\">{schema.joined()}</Schema>\n")
+    }
+    for i in 0..layer.geoms.count {
+        out.append("<Placemark>")
+        if nameAt >= 0 {
+            let v = fmtCell(layer.columns[nameAt], i)
+            if !v.isEmpty {
+                out.append("<name>{fmtXmlEscaped(v)}</name>")
+            }
+        }
+        if descriptionAt >= 0 {
+            let v = fmtCell(layer.columns[descriptionAt], i)
+            if !v.isEmpty {
+                out.append("<description>{fmtXmlEscaped(v)}</description>")
+            }
+        }
+        var extended = false
+        for (c, col) in layer.columns.enumerated() {
+            if c == nameAt || c == descriptionAt {
+                continue
+            }
+            let v = fmtCell(col, i)
+            if v.isEmpty {
+                continue
+            }
+            if !extended {
+                out.append("<ExtendedData><SchemaData schemaUrl=\"#fields\">")
+                extended = true
+            }
+            out.append(keys[c])
+            out.append(fmtXmlEscaped(v))
+            out.append("</SimpleData>")
+        }
+        if extended {
+            out.append("</SchemaData></ExtendedData>")
+        }
+        out.append(fmtKmlGeometryText(fmtToWgs84(layer.geoms[i], from: layer.crs)))
+        out.append("</Placemark>\n")
+    }
+    out.append("</Document>\n</kml>\n")
+    out.joined()
+}

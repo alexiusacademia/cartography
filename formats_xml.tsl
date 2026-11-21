@@ -1,0 +1,356 @@
+// cartography: a small XML reader, enough for KML and GPX: elements,
+// attributes, text, CDATA, entities, comments and processing
+// instructions. Namespace prefixes are dropped: <gx:Track> is an element
+// called Track.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+/// An element: its name, its attributes, the text right inside it, and
+/// the elements inside it.
+struct FmtXmlNode {
+    name: String = ""
+    keys: [String] = []
+    values: [String] = []
+    text: String = ""
+    children: [FmtXmlNode] = []
+
+    /// The value of an attribute, or "".
+    fn attr(_ name: String) -> String {
+        if let i = keys.index(of: name) {
+            return values[i]
+        }
+        ""
+    }
+
+    /// The first element inside called `name`.
+    fn child(_ name: String) -> FmtXmlNode? {
+        children.first(where: { c in c.name == name })
+    }
+
+    /// The text of the first element inside called `name`, trimmed; "" if
+    /// there's none.
+    fn childText(_ name: String) -> String {
+        if let c = child(name) {
+            return c.text.trim()
+        }
+        ""
+    }
+}
+
+/// Where `what` starts in the bytes, looking from `from`; -1 if nowhere.
+fn fmtXmlFind(_ d: Data, from: Int, _ what: String) -> Int {
+    let w = Data(text: what)
+    let first = w[0]
+    let last = d.count - w.count
+    var i = from
+    while i <= last {
+        if d[i] == first {
+            var same = true
+            for k in 1..w.count {
+                if d[i + k] != w[k] {
+                    same = false
+                    break
+                }
+            }
+            if same {
+                return i
+            }
+        }
+        i += 1
+    }
+    -1
+}
+
+/// Is `what` in the bytes at `at`?
+fn fmtXmlStartsWith(_ d: Data, _ at: Int, _ what: String) -> Bool {
+    let w = Data(text: what)
+    if at + w.count > d.count {
+        return false
+    }
+    for k in 0..w.count {
+        if d[at + k] != w[k] {
+            return false
+        }
+    }
+    true
+}
+
+/// The text in bytes `from` up to `to`, with entities (&amp; &#233; …)
+/// turned into their characters.
+fn fmtXmlText(_ d: Data, _ from: Int, _ to: Int) -> String {
+    var plain = true
+    for i in from..to {
+        if d[i] == 38 {
+            plain = false
+            break
+        }
+    }
+    if plain {
+        return fmtText(d.slice(from: from, to: to))
+    }
+    var out: [Int] = []
+    var i = from
+    while i < to {
+        let c = d[i]
+        if c != 38 {
+            out.append(c)
+            i += 1
+            continue
+        }
+        var end = i + 1
+        while end < to && end < i + 12 && d[end] != 59 {
+            end += 1
+        }
+        if end >= to || d[end] != 59 {
+            out.append(c)
+            i += 1
+            continue
+        }
+        let name = d.slice(from: i + 1, to: end).latin1
+        var code = -1
+        if name == "amp" {
+            code = 38
+        } else if name == "lt" {
+            code = 60
+        } else if name == "gt" {
+            code = 62
+        } else if name == "quot" {
+            code = 34
+        } else if name == "apos" {
+            code = 39
+        } else if name == "nbsp" {
+            code = 160
+        } else if name.hasPrefix("#x") || name.hasPrefix("#X") {
+            code = fmtXmlHex(name.substring(from: 2, to: name.count))
+        } else if name.hasPrefix("#") {
+            code = Int(name.substring(from: 1, to: name.count)) ?? -1
+        }
+        if code < 0 || code > 1114111 {
+            // Not an entity we know: left as it's written.
+            out.append(c)
+            i += 1
+            continue
+        }
+        out.appendAll(fmtJsonUtf8(code))
+        i = end + 1
+    }
+    fmtText(Data(bytes: out))
+}
+
+/// A number written in hex, or -1.
+fn fmtXmlHex(_ text: String) -> Int {
+    let d = Data(text: text.lowercase())
+    if d.count == 0 || d.count > 6 {
+        return -1
+    }
+    var v = 0
+    for i in 0..d.count {
+        let c = d[i]
+        if c >= 48 && c <= 57 {
+            v = v * 16 + c - 48
+        } else if c >= 97 && c <= 102 {
+            v = v * 16 + c - 87
+        } else {
+            return -1
+        }
+    }
+    v
+}
+
+/// A name without its namespace prefix.
+fn fmtXmlLocal(_ name: String) -> String {
+    if let colon = name.findLast(":") {
+        return name.substring(from: colon + 1, to: name.count)
+    }
+    name
+}
+
+fn fmtXmlLine(_ d: Data, _ at: Int) -> Int {
+    var line = 1
+    for i in 0..min(at, d.count) {
+        if d[i] == 10 {
+            line += 1
+        }
+    }
+    line
+}
+
+fn fmtXmlIsSpace(_ c: Int) -> Bool {
+    c == 32 || c == 10 || c == 13 || c == 9
+}
+
+/// Reads an XML document. The node given has no name; the document's
+/// elements are its children.
+fn fmtXmlParse(_ d: Data) -> Result<FmtXmlNode> {
+    var stack: [FmtXmlNode] = [FmtXmlNode()]
+    let n = d.count
+    var pos = 0
+    if n >= 3 && d[0] == 239 && d[1] == 187 && d[2] == 191 {
+        pos = 3
+    }
+    while pos < n {
+        if d[pos] != 60 {
+            // Text up to the next tag.
+            let start = pos
+            var blank = true
+            while pos < n && d[pos] != 60 {
+                if blank && !fmtXmlIsSpace(d[pos]) {
+                    blank = false
+                }
+                pos += 1
+            }
+            if !blank && stack.count > 1 {
+                stack[stack.count - 1].text += fmtXmlText(d, start, pos)
+            }
+            continue
+        }
+        let next = if pos + 1 < n { d[pos + 1] } else { 0 }
+        if next == 33 {
+            if pos + 3 < n && d[pos + 2] == 45 && d[pos + 3] == 45 {
+                // <!-- a comment -->
+                let end = fmtXmlFind(d, from: pos + 4, "-->")
+                if end < 0 {
+                    return .failure(error: Error("line {fmtXmlLine(d, pos)}: a comment isn't closed"))
+                }
+                pos = end + 3
+            } else if fmtXmlStartsWith(d, pos, "<![CDATA[") {
+                let end = fmtXmlFind(d, from: pos + 9, "]]>")
+                if end < 0 {
+                    return .failure(error: Error("line {fmtXmlLine(d, pos)}: a CDATA section isn't closed"))
+                }
+                stack[stack.count - 1].text += fmtText(d.slice(from: pos + 9, to: end))
+                pos = end + 3
+            } else {
+                // <!DOCTYPE …>, perhaps with declarations in [ ].
+                var depth = 0
+                pos += 2
+                while pos < n {
+                    let c = d[pos]
+                    if c == 91 {
+                        depth += 1
+                    } else if c == 93 {
+                        depth -= 1
+                    } else if c == 62 && depth <= 0 {
+                        break
+                    }
+                    pos += 1
+                }
+                pos += 1
+            }
+            continue
+        }
+        if next == 63 {
+            // <?xml … ?>
+            let end = fmtXmlFind(d, from: pos + 2, "?>")
+            if end < 0 {
+                return .failure(error: Error("line {fmtXmlLine(d, pos)}: a <? isn't closed"))
+            }
+            pos = end + 2
+            continue
+        }
+        if next == 47 {
+            // </name>
+            var end = pos + 2
+            while end < n && d[end] != 62 {
+                end += 1
+            }
+            if end >= n {
+                return .failure(error: Error("line {fmtXmlLine(d, pos)}: a closing tag isn't finished"))
+            }
+            let name = fmtXmlLocal(fmtText(d.slice(from: pos + 2, to: end)).trim())
+            if stack.count < 2 {
+                return .failure(error: Error("line {fmtXmlLine(d, pos)}: </{name}> closes nothing"))
+            }
+            let node = stack.removeLast()
+            if node.name != name {
+                return .failure(error: Error("line {fmtXmlLine(d, pos)}: </{name}> comes where </{node.name}> should"))
+            }
+            stack[stack.count - 1].children.append(node)
+            pos = end + 1
+            continue
+        }
+        // <name attr="value" …> or <name … />
+        let tagAt = pos
+        pos += 1
+        var start = pos
+        while pos < n && !fmtXmlIsSpace(d[pos]) && d[pos] != 62 && d[pos] != 47 {
+            pos += 1
+        }
+        if pos == start {
+            return .failure(error: Error("line {fmtXmlLine(d, tagAt)}: a < without a name after it"))
+        }
+        var node = FmtXmlNode(name: fmtXmlLocal(fmtText(d.slice(from: start, to: pos))))
+        var closed = false
+        var finished = false
+        while pos < n {
+            let c = d[pos]
+            if fmtXmlIsSpace(c) {
+                pos += 1
+            } else if c == 62 {
+                pos += 1
+                finished = true
+                break
+            } else if c == 47 {
+                closed = true
+                pos += 1
+            } else {
+                start = pos
+                while pos < n && d[pos] != 61 && d[pos] != 62 && d[pos] != 47 && !fmtXmlIsSpace(d[pos]) {
+                    pos += 1
+                }
+                let key = fmtXmlLocal(fmtText(d.slice(from: start, to: pos)))
+                while pos < n && fmtXmlIsSpace(d[pos]) {
+                    pos += 1
+                }
+                var value = ""
+                if pos < n && d[pos] == 61 {
+                    pos += 1
+                    while pos < n && fmtXmlIsSpace(d[pos]) {
+                        pos += 1
+                    }
+                    if pos < n && (d[pos] == 34 || d[pos] == 39) {
+                        let quote = d[pos]
+                        pos += 1
+                        start = pos
+                        while pos < n && d[pos] != quote {
+                            pos += 1
+                        }
+                        if pos >= n {
+                            return .failure(error: Error("line {fmtXmlLine(d, tagAt)}: an attribute's value isn't closed"))
+                        }
+                        value = fmtXmlText(d, start, pos)
+                        pos += 1
+                    } else {
+                        return .failure(error: Error("line {fmtXmlLine(d, tagAt)}: the value of {key} must be in quotes"))
+                    }
+                }
+                node.keys.append(key)
+                node.values.append(value)
+            }
+        }
+        if !finished {
+            return .failure(error: Error("line {fmtXmlLine(d, tagAt)}: the tag <{node.name}> isn't finished"))
+        }
+        if closed {
+            stack[stack.count - 1].children.append(node)
+        } else {
+            stack.append(node)
+        }
+    }
+    if stack.count > 1 {
+        return .failure(error: Error("<{stack[stack.count - 1].name}> is never closed"))
+    }
+    if stack[0].children.isEmpty {
+        return .failure(error: Error("there are no elements in it"))
+    }
+    Result.ok(value: stack[0])
+}
+
+/// Text as it goes between tags or in an attribute.
+fn fmtXmlEscaped(_ text: String) -> String {
+    if !text.contains("&") && !text.contains("<") && !text.contains(">") && !text.contains("\"") {
+        return text
+    }
+    text.replace("&", with: "&amp;").replace("<", with: "&lt;").replace(">", with: "&gt;").replace("\"", with: "&quot;")
+}

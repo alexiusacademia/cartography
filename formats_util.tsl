@@ -1,0 +1,528 @@
+// cartography: what the readers and writers of files share: names of
+// files, numbers as text, and the gathering of features of any kind into
+// layers.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+/// What a reader of text calls it in an error: its name, or "the text".
+fn fmtLabel(_ name: String) -> String {
+    if name.isEmpty { "the text" } else { name }
+}
+
+/// Of layers read from one file (one for each kind of shape), the one
+/// with the most features.
+fn fmtMostFeatures(_ layers: [Layer]) -> Layer {
+    var best = 0
+    for (i, l) in layers.enumerated() {
+        if l.geoms.count > layers[best].geoms.count {
+            best = i
+        }
+    }
+    var out = layers[best]
+    out.name = fmtStripKind(out.name)
+    out
+}
+
+/// A layer's name without the " (points)" a reader added to tell the
+/// kinds of a file apart.
+fn fmtStripKind(_ name: String) -> String {
+    for suffix in [" (points)", " (lines)", " (polygons)"] {
+        if name.hasSuffix(suffix) {
+            return name.substring(from: 0, to: name.count - suffix.count)
+        }
+    }
+    name
+}
+
+/// A file's name without its folder and its extension: "roads" for
+/// "/data/roads.shp".
+fn fmtBaseName(_ path: String) -> String {
+    let name = path.fileName
+    if let dot = name.findLast(".") {
+        if dot > 0 {
+            return name.substring(from: 0, to: dot)
+        }
+    }
+    name
+}
+
+/// The path with another extension (given without its dot).
+fn fmtWithExtension(_ path: String, _ ext: String) -> String {
+    let old = path.fileExtension
+    if old.isEmpty {
+        return path + "." + ext
+    }
+    path.substring(from: 0, to: path.count - old.count) + ext
+}
+
+/// The file next to `path` with the extension `ext`, however its capitals
+/// are written, or nil if there's none.
+fn fmtSibling(_ path: String, _ ext: String) -> String? {
+    for e in [ext, ext.uppercase(), ext.capitalized()] {
+        let p = fmtWithExtension(path, e)
+        if fileExists(p) && !isFolder(p) {
+            return p
+        }
+    }
+    nil
+}
+
+fn fmtReadError(_ path: String, _ why: String) -> Error {
+    Error("can't read {path.fileName}: {why}")
+}
+
+fn fmtWriteError(_ path: String, _ why: String) -> Error {
+    Error("can't write {path.fileName}: {why}")
+}
+
+/// The bytes of a file, or why they can't be had.
+fn fmtLoad(_ path: String) -> Result<Data> {
+    if !fileExists(path) {
+        return .failure(error: fmtReadError(path, "there's no such file"))
+    }
+    if isFolder(path) {
+        return .failure(error: fmtReadError(path, "it's a folder"))
+    }
+    if let d = readData(path) {
+        return .ok(value: d)
+    }
+    Result.failure(error: fmtReadError(path, "the file can't be opened"))
+}
+
+/// Writes text to a file.
+fn fmtSave(_ path: String, _ text: String) -> Error? {
+    if writeFile(path: path, text: text) {
+        return nil
+    }
+    fmtWriteError(path, "the file can't be written there")
+}
+
+/// Bytes as text: UTF-8 if they are, Latin-1 otherwise.
+fn fmtText(_ d: Data) -> String {
+    d.text ?? d.latin1
+}
+
+/// A number with up to `decimals` digits after the point, without zeros at
+/// the end: 12, 0.5, -7.25.
+fn fmtNum(_ x: Float, _ decimals: Int) -> String {
+    if x == floor(x) && abs(x) < 1000000000000000.0 {
+        return "{Int(x)}"
+    }
+    let text = x.formatted(decimals: decimals)
+    if decimals <= 0 || !x.isFinite {
+        return text
+    }
+    let d = Data(text: text)
+    var end = d.count
+    while end > 0 && d[end - 1] == 48 {
+        end -= 1
+    }
+    if end > 0 && d[end - 1] == 46 {
+        end -= 1
+    }
+    if end == d.count {
+        return text
+    }
+    let out = text.substring(from: 0, to: end)
+    if out == "-0" { "0" } else { out }
+}
+
+/// A number as the shortest text that reads back as the same number;
+/// whole numbers without a point.
+fn fmtShort(_ x: Float) -> String {
+    if x == floor(x) && abs(x) < 1000000000000000.0 {
+        return "{Int(x)}"
+    }
+    let text = "{x}"
+    if text.hasSuffix(".0") {
+        return text.substring(from: 0, to: text.count - 2)
+    }
+    text
+}
+
+/// The number written in bytes `from` up to `to`, or NaN.
+fn fmtFloatAt(_ d: Data, _ from: Int, _ to: Int) -> Float {
+    Float(d.slice(from: from, to: to).text ?? "") ?? (0.0 / 0.0)
+}
+
+/// The points of a line or ring in the opposite order.
+fn fmtReversed(_ coords: [Float]) -> [Float] {
+    var out: [Float] = []
+    var i = coords.count - 2
+    while i >= 0 {
+        out.append(coords[i])
+        out.append(coords[i + 1])
+        i -= 2
+    }
+    out
+}
+
+/// The ring running counterclockwise (or clockwise) with y up.
+fn fmtOriented(_ ring: [Float], counterclockwise: Bool) -> [Float] {
+    let area = ringArea2(ring)
+    if area == 0.0 || (area > 0.0) == counterclockwise {
+        return ring
+    }
+    fmtReversed(ring)
+}
+
+fn fmtKind(_ k: Int) -> GeomKind {
+    if k == 1 {
+        return .line
+    }
+    if k == 2 {
+        return .polygon
+    }
+    GeomKind.point
+}
+
+fn fmtKindNumber(_ k: GeomKind) -> Int {
+    match k {
+        .point -> 0
+        .line -> 1
+        .polygon -> 2
+    }
+}
+
+/// The shapes of one feature while a file is read. Files can put points,
+/// lines and polygons in one feature; a layer can't, so they're kept apart.
+struct FmtShape {
+    points: [Float] = []
+    lines: [[Float]] = []
+    rings: [[Float]] = []
+    /// Where each polygon starts in `rings`.
+    starts: [Int] = []
+    /// The kind the file says the feature is when it has no coordinates
+    /// (0 point, 1 line, 2 polygon), or -1 if it doesn't say.
+    hint: Int = -1
+    /// The kind of the first shape that was added, or -1.
+    first: Int = -1
+
+    fn addPoints(_ coords: [Float]) {
+        if first < 0 && coords.count >= 2 {
+            first = 0
+        }
+        if points.isEmpty {
+            points = coords
+        } else {
+            points.appendAll(coords)
+        }
+        if hint < 0 {
+            hint = 0
+        }
+    }
+
+    fn addLine(_ coords: [Float]) {
+        if coords.count >= 2 {
+            lines.append(coords)
+            if first < 0 {
+                first = 1
+            }
+        } else if hint < 0 {
+            hint = 1
+        }
+    }
+
+    /// One polygon: its outer ring, then its holes.
+    fn addPolygon(_ polygon: [[Float]]) {
+        var any = false
+        for r in polygon {
+            if r.count < 2 {
+                continue
+            }
+            if !any {
+                starts.append(rings.count)
+                any = true
+            }
+            rings.append(r)
+        }
+        if any && first < 0 {
+            first = 2
+        }
+        if !any && hint < 0 {
+            hint = 2
+        }
+    }
+
+    fn merge(_ other: FmtShape) {
+        if first < 0 {
+            first = other.first
+        }
+        if !other.points.isEmpty {
+            addPoints(other.points)
+        }
+        for l in other.lines {
+            lines.append(l)
+        }
+        for s in other.starts {
+            starts.append(s + rings.count)
+        }
+        for r in other.rings {
+            rings.append(r)
+        }
+        if hint < 0 {
+            hint = other.hint
+        }
+    }
+
+    /// The kinds it has shapes of.
+    fn kinds() -> [Int] {
+        var out: [Int] = []
+        if points.count >= 2 {
+            out.append(0)
+        }
+        if !lines.isEmpty {
+            out.append(1)
+        }
+        if !rings.isEmpty {
+            out.append(2)
+        }
+        out
+    }
+
+    fn geometry(_ kind: Int) -> Geometry {
+        if kind == 0 {
+            return makeGeometry(kind: .point, parts: [points])
+        }
+        if kind == 1 {
+            return makeGeometry(kind: .line, parts: lines)
+        }
+        makeGeometry(kind: .polygon, parts: rings, polygons: starts)
+    }
+}
+
+/// The shapes of a geometry of the model, to add to another's.
+fn fmtShapeOf(_ g: Geometry) -> FmtShape {
+    var s = FmtShape(hint: fmtKindNumber(g.kind))
+    if g.isEmpty() {
+        return s
+    }
+    match g.kind {
+        .point -> {
+            for p in g.parts {
+                s.addPoints(p)
+            }
+        }
+        .line -> {
+            for p in g.parts {
+                s.addLine(p)
+            }
+        }
+        .polygon -> {
+            s.rings = g.parts
+            s.starts = g.polygons
+        }
+    }
+    s
+}
+
+/// One field while a file is read, before its kind is known.
+struct FmtColumn {
+    name: String
+    texts: [String] = []
+    nums: [Float] = []
+    /// Every value so far is a number.
+    numeric: Bool = true
+    /// Every value so far is a whole number.
+    whole: Bool = true
+    any: Bool = false
+}
+
+/// The attributes of the features while a file is read: fields are added
+/// as they're met, and a row may leave any of them out.
+struct FmtTable {
+    cols: [FmtColumn] = []
+    index: [String: Int] = [:]
+
+    /// The place of the field called `name`, added if it's new.
+    fn column(_ name: String) -> Int {
+        if let i = index[name] {
+            return i
+        }
+        cols.append(FmtColumn(name: name))
+        index[name] = cols.count - 1
+        cols.count - 1
+    }
+
+    /// Makes sure there's a field called `name`.
+    fn touch(_ name: String) {
+        if index[name] == nil {
+            cols.append(FmtColumn(name: name))
+            index[name] = cols.count - 1
+        }
+    }
+
+    fn pad(_ col: Int, to: Int) {
+        let none = 0.0 / 0.0
+        while cols[col].texts.count < to {
+            cols[col].texts.append("")
+            cols[col].nums.append(none)
+        }
+    }
+
+    /// Sets a text value. An empty text is "no value".
+    fn setText(row: Int, name: String, text: String) {
+        let c = column(name)
+        pad(c, to: row + 1)
+        cols[c].texts[row] = text
+        cols[c].nums[row] = 0.0 / 0.0
+        if !text.isEmpty {
+            cols[c].any = true
+            cols[c].numeric = false
+        }
+    }
+
+    /// Sets a number, with the text it was written as. `whole` says
+    /// whether it's written as a whole number (12, not 12.0 or 1e3).
+    fn setNumber(row: Int, name: String, value: Float, text: String, whole: Bool) {
+        let c = column(name)
+        pad(c, to: row + 1)
+        cols[c].texts[row] = text
+        cols[c].nums[row] = value
+        cols[c].any = true
+        if !value.isFinite {
+            cols[c].numeric = false
+        } else if !whole || value != floor(value) || abs(value) > 9007199254740992.0 {
+            cols[c].whole = false
+        }
+    }
+
+    /// Gives row `to` (the one after `from`) the values of row `from`.
+    fn copyRow(from: Int, to: Int) {
+        for c in 0..cols.count {
+            if cols[c].texts.count > from {
+                pad(c, to: to + 1)
+                cols[c].texts[to] = cols[c].texts[from]
+                cols[c].nums[to] = cols[c].nums[from]
+            }
+        }
+    }
+
+    /// The columns for `rows` features: whole numbers if every value of a
+    /// field is written as one, numbers if every value is a number, text
+    /// otherwise.
+    fn typedColumns(rows: Int) -> [Column] {
+        var out: [Column] = []
+        for c in 0..cols.count {
+            pad(c, to: rows)
+            if cols[c].any && cols[c].numeric {
+                let kind = if cols[c].whole { FieldKind.int } else { FieldKind.float }
+                out.append(Column(name: cols[c].name, kind: kind, nums: cols[c].nums))
+            } else {
+                out.append(Column(name: cols[c].name, kind: .text, texts: cols[c].texts))
+            }
+        }
+        out
+    }
+
+    /// The columns for `rows` features, their kinds guessed from the text
+    /// of their values (for files where every value is text).
+    fn guessedColumns(rows: Int) -> [Column] {
+        var out: [Column] = []
+        for c in 0..cols.count {
+            pad(c, to: rows)
+            out.append(columnFromTexts(name: cols[c].name, values: cols[c].texts))
+        }
+        out
+    }
+}
+
+/// The features of a file while it's read: shapes of any kind, and their
+/// attributes in `table` (the row of the next feature is `count()`).
+struct FmtBuilder {
+    geoms: [Geometry] = []
+    /// Each feature's kind (0 point, 1 line, 2 polygon), or -1 for one
+    /// without a shape of any kind.
+    kinds: [Int] = []
+    table: FmtTable = FmtTable()
+
+    fn count() -> Int {
+        geoms.count
+    }
+
+    /// Adds a feature whose attributes are already in the table. One with
+    /// shapes of several kinds becomes a feature for each, with the same
+    /// attributes.
+    fn add(_ shape: FmtShape) {
+        let found = shape.kinds()
+        if found.isEmpty {
+            geoms.append(emptyGeometry(fmtKind(shape.hint)))
+            kinds.append(shape.hint)
+            return
+        }
+        var first = true
+        for k in found {
+            if !first {
+                table.copyRow(from: geoms.count - 1, to: geoms.count)
+            }
+            geoms.append(shape.geometry(k))
+            kinds.append(k)
+            first = false
+        }
+    }
+
+    fn addGeometry(_ g: Geometry) {
+        geoms.append(g)
+        kinds.append(fmtKindNumber(g.kind))
+    }
+
+    /// A feature without a shape.
+    fn addNone() {
+        geoms.append(emptyGeometry(.point))
+        kinds.append(-1)
+    }
+
+    /// The layers: one for each kind of shape there is. Features without a
+    /// shape go to the first; without any shape at all, they make a layer
+    /// of points that is only a table.
+    fn layers(name: String, source: String, crs: geodesy.Crs, columns: [Column]) -> [Layer] {
+        var counts = [0, 0, 0]
+        for k in kinds {
+            if k >= 0 {
+                counts[k] += 1
+            }
+        }
+        var present: [Int] = []
+        for k in 0..3 {
+            if counts[k] > 0 {
+                present.append(k)
+            }
+        }
+        if present.count <= 1 {
+            let kind = fmtKind(present.first ?? 0)
+            var all = geoms
+            if kinds.contains(-1) && kind != .point {
+                for i in 0..all.count {
+                    if kinds[i] < 0 {
+                        all[i] = emptyGeometry(kind)
+                    }
+                }
+            }
+            return [Layer(name: name, source: source, crs: crs, geomKind: kind, geoms: all, columns: columns,
+                          style: Style(symbol: defaultSymbol(kind, seed: 0)))]
+        }
+        let suffixes = [" (points)", " (lines)", " (polygons)"]
+        var out: [Layer] = []
+        for k in present {
+            let kind = fmtKind(k)
+            var rows: [Int] = []
+            var picked: [Geometry] = []
+            for i in 0..geoms.count {
+                if kinds[i] == k {
+                    rows.append(i)
+                    picked.append(geoms[i])
+                } else if kinds[i] < 0 && k == present[0] {
+                    rows.append(i)
+                    picked.append(emptyGeometry(kind))
+                }
+            }
+            out.append(Layer(name: name + suffixes[k], source: source, crs: crs, geomKind: kind, geoms: picked,
+                             columns: columns.map { c in c.picking(rows) },
+                             style: Style(symbol: defaultSymbol(kind, seed: out.count))))
+        }
+        out
+    }
+}
