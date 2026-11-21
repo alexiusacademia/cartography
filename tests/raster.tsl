@@ -1,0 +1,639 @@
+// cartography's raster tests: reading GeoTIFF of every kind, ASCII grids,
+// SRTM and pictures with world files, checked against what GDAL reads in
+// the same files (tests/data/raster/expected.json, made with the fixtures
+// by tools/oracle/raster_fixtures.py); terrain against gdaldem; contours
+// against contourpy; writers by reading back; rendering and warping.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import ".."
+import geodesy
+
+// What GDAL read in one band of a fixture (no-data cells left out).
+struct RasTBand {
+    count: Int
+    sum: Float
+    weighted: Float
+    low: Float
+    high: Float
+    first: [Float]
+}
+
+// What GDAL read in one fixture.
+struct RasTFile {
+    file: String
+    width: Int
+    height: Int
+    minX: Float
+    maxY: Float
+    cellX: Float
+    cellY: Float
+    epsg: Int
+    hasNoData: Bool
+    noData: Float
+    centerLon: Float
+    centerLat: Float
+    bands: [RasTBand]
+}
+
+// One contour level as contourpy draws it.
+struct RasTLevel {
+    level: Float
+    lines: Int
+    closed: Int
+    length: Float
+}
+
+struct RasTExpected {
+    files: [RasTFile]
+    contours: [RasTLevel]
+}
+
+// The folder of the fixtures, from the library's folder or the tests'.
+fn rasTFolder() -> String {
+    if fileExists("tests/data/raster/expected.json") {
+        return "tests/data/raster"
+    }
+    "data/raster"
+}
+
+fn rasTPath(_ name: String) -> String {
+    joinPath(rasTFolder(), name)
+}
+
+fn rasTExpected() -> RasTExpected {
+    match readText(rasTPath("expected.json")) {
+        .ok(text) -> {
+            if let e: RasTExpected = fromJson(text) {
+                return e
+            }
+            fail("expected.json doesn't read")
+        }
+        .failure(e) -> fail(e.message)
+    }
+    RasTExpected(files: [], contours: [])
+}
+
+fn rasTEntry(_ name: String) -> RasTFile? {
+    for f in rasTExpected().files {
+        if f.file == name {
+            return f
+        }
+    }
+    nil
+}
+
+// The entry of a fixture; the test fails without one.
+fn rasTMust(_ name: String) -> RasTFile {
+    if let e = rasTEntry(name) {
+        return e
+    }
+    fail("{name} isn't in expected.json")
+    RasTFile(file: name, width: 0, height: 0, minX: 0.0, maxY: 0.0, cellX: 0.0, cellY: 0.0, epsg: 0, hasNoData: false,
+             noData: 0.0, centerLon: 0.0, centerLat: 0.0, bands: [])
+}
+
+fn rasTRead(_ name: String) -> cartography.Layer {
+    match cartography.readRaster(rasTPath(name)) {
+        .ok(layer) -> layer
+        .failure(e) -> {
+            fail("{name}: {e.message}")
+            cartography.Layer()
+        }
+    }
+}
+
+fn rasTClose(_ a: Float, _ b: Float, _ tol: Float) -> Bool {
+    abs(a - b) <= tol * max(1.0, max(abs(a), abs(b)))
+}
+
+// Reads a fixture and checks it against what GDAL read in it: size,
+// place, CRS, no-data, and every band's values (count, sum, a weighted
+// sum that depends on where each value is, extremes, the first values).
+fn rasTCheck(_ name: String, crsTolerance: Float = 0.0000001) {
+    let e = rasTMust(name)
+    let layer = rasTRead(name)
+    let r = layer.raster
+    expect(layer.kind == cartography.LayerKind.raster, "{name}: kind")
+    expect(r.width == e.width, "{name}: width")
+    expect(r.height == e.height, "{name}: height")
+    expect(rasTClose(r.box.minX, e.minX, 0.000000000001), "{name}: left {r.box.minX} vs {e.minX}")
+    expect(rasTClose(r.box.maxY, e.maxY, 0.000000000001), "{name}: top {r.box.maxY} vs {e.maxY}")
+    let (cx, cy) = cartography.rasterCellSize(r)
+    expect(rasTClose(cx, e.cellX, 0.000000001), "{name}: cell width {cx} vs {e.cellX}")
+    expect(rasTClose(cy, e.cellY, 0.000000001), "{name}: cell height {cy} vs {e.cellY}")
+    if e.epsg != 0 && e.epsg != 25395 && !name.hasSuffix(".asc") {
+        expect(layer.crs.code == e.epsg, "{name}: EPSG {layer.crs.code} vs {e.epsg}")
+    }
+    let (lon, lat) = layer.crs.toWGS84(r.box.centerX(), r.box.centerY())
+    expect(abs(lon - e.centerLon) <= crsTolerance, "{name}: center longitude {lon} vs {e.centerLon}")
+    expect(abs(lat - e.centerLat) <= crsTolerance, "{name}: center latitude {lat} vs {e.centerLat}")
+    if e.hasNoData {
+        expect(r.noData == e.noData, "{name}: no-data {r.noData} vs {e.noData}")
+    }
+    expect(r.bands.count == e.bands.count, "{name}: {r.bands.count} bands vs {e.bands.count}")
+    if r.bands.count != e.bands.count {
+        return
+    }
+    for (b, eb) in e.bands.enumerated() {
+        var count = 0
+        var sum = 0.0
+        var weighted = 0.0
+        let band = r.bands[b]
+        expect(band.count == r.width * r.height, "{name}: band {b} has {band.count} cells")
+        for (i, v) in band.enumerated() {
+            if v.isFinite {
+                count += 1
+                sum += v
+                weighted += v * Float(i % 97 + 1)
+            }
+        }
+        expect(count == eb.count, "{name}: band {b}: {count} cells with values vs {eb.count}")
+        expect(rasTClose(sum, eb.sum, 0.000000000001), "{name}: band {b}: sum {sum} vs {eb.sum}")
+        expect(rasTClose(weighted, eb.weighted, 0.000000000001), "{name}: band {b}: weighted sum {weighted} vs {eb.weighted}")
+        expect(r.lows[b] == eb.low, "{name}: band {b}: low {r.lows[b]} vs {eb.low}")
+        expect(r.highs[b] == eb.high, "{name}: band {b}: high {r.highs[b]} vs {eb.high}")
+        for (k, v) in eb.first.enumerated() {
+            if v < -1.0e299 {
+                expect(band[k].isNaN, "{name}: band {b}: cell {k} should have no value")
+            } else {
+                expect(band[k] == v, "{name}: band {b}: cell {k} is {band[k]} vs {v}")
+            }
+        }
+    }
+}
+
+// ----- GeoTIFF: types, packings, layouts -----
+
+test "GeoTIFF uint8, no packing, strips" { rasTCheck("u8_none_strip.tif") }
+test "GeoTIFF uint8, LZW, strips" { rasTCheck("u8_lzw_strip.tif") }
+test "GeoTIFF uint8, LZW, predictor 2" { rasTCheck("u8_lzw_pred2.tif") }
+test "GeoTIFF uint8, Deflate, tiles" { rasTCheck("u8_deflate_tile.tif") }
+test "GeoTIFF uint8, PackBits" { rasTCheck("u8_packbits.tif") }
+test "GeoTIFF int8, Deflate" { rasTCheck("i8_deflate.tif") }
+test "GeoTIFF uint16, LZW, predictor 2, tiles" { rasTCheck("u16_lzw_pred2_tile.tif") }
+test "GeoTIFF uint16, big-endian" { rasTCheck("u16_none_big.tif") }
+test "GeoTIFF int16, Deflate, predictor 2" { rasTCheck("i16_deflate_pred2.tif") }
+test "GeoTIFF int16, PackBits" { rasTCheck("i16_packbits.tif") }
+test "GeoTIFF int16, LZW, predictor 2, big-endian" { rasTCheck("i16_lzw_big_pred2.tif") }
+test "GeoTIFF uint32, Deflate" { rasTCheck("u32_deflate.tif") }
+test "GeoTIFF int32, LZW, predictor 2" { rasTCheck("i32_lzw_pred2.tif") }
+test "GeoTIFF float32, no packing" { rasTCheck("f32_none.tif") }
+test "GeoTIFF float32, LZW, predictor 3" { rasTCheck("f32_lzw_pred3.tif") }
+test "GeoTIFF float32, Deflate, predictor 3, tiles" { rasTCheck("f32_deflate_pred3_tile.tif") }
+test "GeoTIFF float32, Deflate, predictor 2" { rasTCheck("f32_deflate_pred2.tif") }
+test "GeoTIFF float32, LZW, predictor 3, big-endian" { rasTCheck("f32_lzw_big_pred3.tif") }
+test "GeoTIFF float32, PackBits, tiles" { rasTCheck("f32_packbits_tile.tif") }
+test "GeoTIFF float64, Deflate, predictor 3" { rasTCheck("f64_deflate_pred3.tif") }
+test "GeoTIFF float64, tiles" { rasTCheck("f64_none_tile.tif") }
+test "GeoTIFF RGB, pixel-interleaved, LZW" { rasTCheck("rgb_pixel_lzw.tif") }
+test "GeoTIFF RGB, band-interleaved, Deflate, tiles" { rasTCheck("rgb_band_deflate_tile.tif") }
+test "GeoTIFF four uint16 bands, predictor 2" { rasTCheck("u16_4band_pred2.tif") }
+test "GeoTIFF two float32 bands, band-interleaved" { rasTCheck("f32_2band_band_lzw.tif") }
+
+// ----- no-data, places, coordinate systems -----
+
+test "GeoTIFF float32 with no-data -9999" { rasTCheck("f32_nodata.tif") }
+test "GeoTIFF int16 with no-data -32768" { rasTCheck("i16_nodata.tif") }
+test "GeoTIFF float32 with NaN as no-data" { rasTCheck("f32_nan_nodata.tif") }
+test "GeoTIFF in EPSG:4326" { rasTCheck("crs_4326.tif") }
+test "GeoTIFF in EPSG:3857" { rasTCheck("crs_3857.tif") }
+test "GeoTIFF in EPSG:3123 (PRS92 zone 3)" { rasTCheck("crs_3123.tif") }
+test "GeoTIFF in a transverse Mercator of its own" { rasTCheck("crs_custom_tmerc.tif", crsTolerance: 0.0000001) }
+test "GeoTIFF in a Lambert conformal conic of its own" { rasTCheck("crs_custom_lcc.tif", crsTolerance: 0.0000001) }
+test "GeoTIFF with cells as points" { rasTCheck("point_cells.tif") }
+test "GeoTIFF DEM" { rasTCheck("dem.tif") }
+test "GeoTIFF DEM with holes" { rasTCheck("dem_holes.tif") }
+
+// ----- other formats -----
+
+test "ESRI ASCII grid with a .prj" { rasTCheck("dem.asc") }
+
+test "PNG with a world file" {
+    rasTCheck("picture.png")
+    let layer = rasTRead("picture.png")
+    expect(layer.crs.code == 4326)
+    expect(layer.rasterStyle.look == cartography.RasterLook.rgb)
+}
+
+test "SRTM .hgt" {
+    let folder = joinPath(tempFolder(), "cartography-raster-hgt")
+    let _made = createFolder(path: folder)
+    let path = joinPath(folder, "S08W035.hgt")
+    // 3 × 3 cells, most significant byte first; -32768 is a void.
+    var bytes: [Int] = []
+    for v in [10, 20, 30, -5, -32768, 300, 0, 1, 2] {
+        let u = if v < 0 { v + 65536 } else { v }
+        bytes.append(u / 256)
+        bytes.append(u % 256)
+    }
+    if let e = writeBytes(path: path, data: Data(bytes: bytes)) {
+        fail(e.message)
+    }
+    match cartography.readHGT(path) {
+        .ok(layer) -> {
+            let r = layer.raster
+            expect(r.width == 3 && r.height == 3)
+            expect(r.bands[0][0] == 10.0 && r.bands[0][3] == -5.0 && r.bands[0][5] == 300.0)
+            expect(r.bands[0][4].isNaN)
+            expect(r.lows[0] == -5.0 && r.highs[0] == 300.0)
+            // Cell centers on whole degrees: half a cell (0.5°) outside them.
+            expect(abs(r.box.minX - -35.25) < 0.0000001 && abs(r.box.maxX - -33.75) < 0.0000001)
+            expect(abs(r.box.minY - -8.25) < 0.0000001 && abs(r.box.maxY - -6.75) < 0.0000001)
+            expect(layer.crs.code == 4326)
+        }
+        .failure(e) -> fail(e.message)
+    }
+    match cartography.readRaster(joinPath(folder, "nowhere.hgt")) {
+        .ok(_) -> fail("a missing file reads")
+        .failure(_) -> {}
+    }
+}
+
+test "readRaster turns down what it can't read" {
+    match cartography.readRaster("map.xyz") {
+        .ok(_) -> fail("a .xyz reads")
+        .failure(e) -> expect(e.message.contains(".xyz"))
+    }
+    match cartography.readRaster(rasTPath("expected.json")) {
+        .ok(_) -> fail("JSON reads as a raster")
+        .failure(_) -> {}
+    }
+}
+
+// ----- values and statistics -----
+
+test "values at points" {
+    let layer = rasTRead("u8_none_strip.tif")
+    // Cell (col 2, row 0): 14; (col 0, row 1): 13.
+    expect(cartography.rasterValue(layer, 500000.0 + 75.0, 1600000.0 - 1.0) == 14.0)
+    expect(cartography.rasterValue(layer, 500000.0 + 1.0, 1600000.0 - 31.0) == 13.0)
+    expect(cartography.rasterValue(layer, 499999.0, 1600000.0 - 1.0).isNaN)
+    expect(cartography.rasterValues(layer, 500001.0, 1599999.0) == [0.0])
+    let rgb = rasTRead("rgb_pixel_lzw.tif")
+    expect(cartography.rasterValues(rgb, 500001.0, 1599999.0) == [0.0, 29.0, 58.0])
+    expect(cartography.rasterValue(rgb, 500001.0, 1599999.0, band: 2) == 58.0)
+    expect(cartography.sampleRaster(layer.raster, points: [500075.0, 1599999.0, 0.0, 0.0]).count == 2)
+}
+
+test "statistics match GDAL's values" {
+    let e = rasTMust("dem_holes.tif")
+    let s = cartography.rasterStatistics(rasTRead("dem_holes.tif").raster)
+    expect(s.count == e.bands[0].count)
+    expect(rasTClose(s.sum, e.bands[0].sum, 0.000000000001))
+    expect(rasTClose(s.mean, e.bands[0].sum / Float(e.bands[0].count), 0.000000000001))
+    expect(s.min == e.bands[0].low && s.max == e.bands[0].high)
+    let h = cartography.rasterHistogram(rasTRead("dem_holes.tif").raster, bins: 10)
+    var total = 0
+    for c in h {
+        total += c
+    }
+    expect(h.count == 10 && total == e.bands[0].count)
+}
+
+test "zonal statistics" {
+    let layer = rasTRead("u8_none_strip.tif")
+    // A square over the centers of the first 2 × 2 cells: 0, 7, 13, 20.
+    let zone = cartography.boxGeometry(cartography.boxOf(minX: 500001.0, minY: 1599941.0, maxX: 500059.0, maxY: 1599999.0))
+    let s = cartography.zonalStatistics(layer.raster, zones: [zone])
+    expect(s.count == 1 && s[0].count == 4)
+    expect(s[0].sum == 40.0 && s[0].min == 0.0 && s[0].max == 20.0)
+}
+
+// ----- terrain against gdaldem -----
+
+// The largest difference between two bands, over the cells where both
+// have values, and how many such cells there are.
+fn rasTLargestDifference(_ a: [Float], _ b: [Float], scale: Float = 1.0, shift: Float = 0.0) -> (Float, Int) {
+    var worst = 0.0
+    var n = 0
+    for i in 0..min(a.count, b.count) {
+        if a[i].isFinite && b[i].isFinite {
+            worst = max(worst, abs(a[i] * scale + shift - b[i]))
+            n += 1
+        }
+    }
+    (worst, n)
+}
+
+test "hillshade as gdaldem draws it" {
+    let dem = rasTRead("dem.tif")
+    // gdaldem writes 1 + 254 × the light, rounded, into bytes; ours is
+    // 255 × the light.
+    let ours = cartography.hillshade(dem)
+    let gdal = rasTRead("dem_hillshade.tif")
+    let (worst, n) = rasTLargestDifference(ours.raster.bands[0], gdal.raster.bands[0], scale: 254.0 / 255.0, shift: 1.0)
+    expect(n == 60 * 45, "cells compared: {n}")
+    expect(worst <= 1.0, "largest difference {worst}")
+    let other = cartography.hillshade(dem, azimuth: 135.0, altitude: 30.0, exaggeration: 2.0)
+    let gdal2 = rasTRead("dem_hillshade_135_30_z2.tif")
+    let (worst2, n2) = rasTLargestDifference(other.raster.bands[0], gdal2.raster.bands[0], scale: 254.0 / 255.0, shift: 1.0)
+    expect(n2 == 60 * 45 && worst2 <= 1.0, "largest difference {worst2}")
+    expect(ours.crs.code == 32651 && ours.raster.box.minX == dem.raster.box.minX)
+}
+
+test "slope and aspect as gdaldem works them out" {
+    let dem = rasTRead("dem.tif")
+    let (ws, ns) = rasTLargestDifference(cartography.slope(dem).raster.bands[0], rasTRead("dem_slope.tif").raster.bands[0])
+    expect(ns == 60 * 45 && ws < 0.0001, "slope: largest difference {ws} over {ns} cells")
+    let (wa, na) = rasTLargestDifference(cartography.aspect(dem).raster.bands[0], rasTRead("dem_aspect.tif").raster.bands[0])
+    expect(na == 60 * 45 && wa < 0.01, "aspect: largest difference {wa} over {na} cells")
+}
+
+test "slope around holes" {
+    let dem = rasTRead("dem_holes.tif")
+    let ours = cartography.slope(dem).raster.bands[0]
+    let gdal = rasTRead("dem_holes_slope.tif").raster.bands[0]
+    // Next to the hole (rows 20–22, columns 25–28) missing neighbours are
+    // taken to be as high as the cell, as gdaldem takes them.
+    var worst = 0.0
+    var holes = 0
+    for row in 0..45 {
+        for col in 0..60 {
+            let i = row * 60 + col
+            if ours[i].isNaN {
+                holes += 1
+                expect(gdal[i].isNaN)
+                continue
+            }
+            worst = max(worst, abs(ours[i] - gdal[i]))
+        }
+    }
+    expect(holes == 12, "holes: {holes}")
+    expect(worst < 0.0001, "largest difference {worst}")
+}
+
+test "slope of a DEM in degrees" {
+    // gdaldem is given the size of a degree on WGS84 at the middle row;
+    // ours works it out at each row (45 rows of 0.0003°: nearly the same).
+    let dem = rasTRead("dem_4326.tif")
+    let (worst, n) = rasTLargestDifference(cartography.slope(dem).raster.bands[0], rasTRead("dem_4326_slope.tif").raster.bands[0])
+    expect(n == 60 * 45 && worst < 0.001, "largest difference {worst}")
+}
+
+// ----- contours against contourpy -----
+
+test "contour lines as contourpy draws them" {
+    let dem = rasTRead("dem.tif")
+    let lines = cartography.contours(dem, interval: 25.0)
+    expect(lines.geomKind == cartography.GeomKind.line && lines.crs.code == 32651)
+    expect(lines.columns.count == 1 && lines.columns[0].name == "elev")
+    let levels = rasTExpected().contours
+    var total = 0
+    for lv in levels {
+        var count = 0
+        var closed = 0
+        var length = 0.0
+        for (i, g) in lines.geoms.enumerated() {
+            if lines.columns[0].nums[i] == lv.level {
+                count += 1
+                length += cartography.lineLength(g.parts[0])
+                let p = g.parts[0]
+                if p[0] == p[p.count - 2] && p[1] == p[p.count - 1] {
+                    closed += 1
+                }
+            }
+        }
+        total += count
+        expect(count == lv.lines, "level {lv.level}: {count} lines vs {lv.lines}")
+        expect(closed == lv.closed, "level {lv.level}: {closed} closed vs {lv.closed}")
+        expect(rasTClose(length, lv.length, 0.000000001), "level {lv.level}: length {length} vs {lv.length}")
+    }
+    expect(total == lines.geoms.count)
+}
+
+// ----- writing -----
+
+fn rasTTemp(_ name: String) -> String {
+    let folder = joinPath(tempFolder(), "cartography-raster-tests")
+    let _made = createFolder(path: folder)
+    joinPath(folder, name)
+}
+
+// Writes a layer and reads it back.
+fn rasTRoundTrip(_ layer: cartography.Layer, _ name: String, compression: String, type: String) -> cartography.Layer {
+    let path = rasTTemp(name)
+    match cartography.writeGeoTIFF(layer, path, compression: compression, type: type) {
+        .ok(_) -> {}
+        .failure(e) -> fail("{name}: {e.message}")
+    }
+    match cartography.readRaster(path) {
+        .ok(back) -> { return back }
+        .failure(e) -> fail("{name}: {e.message}")
+    }
+    cartography.Layer()
+}
+
+test "GeoTIFF written and read back, every packing" {
+    let dem = rasTRead("dem_holes.tif")
+    for how in ["deflate", "lzw", "none"] {
+        let back = rasTRoundTrip(dem, "dem_{how}.tif", compression: how, type: "float32")
+        expect(back.raster.width == 60 && back.raster.height == 45)
+        expect(back.crs.code == 32651)
+        expect(back.raster.box.minX == dem.raster.box.minX && back.raster.box.maxY == dem.raster.box.maxY)
+        expect(back.raster.noData == -9999.0)
+        var same = true
+        for i in 0..dem.raster.bands[0].count {
+            let a = dem.raster.bands[0][i]
+            let b = back.raster.bands[0][i]
+            if !(a == b || (a.isNaN && b.isNaN)) {
+                same = false
+            }
+        }
+        expect(same, "{how}: values")
+    }
+}
+
+test "GeoTIFF written in whole number types" {
+    let rgb = rasTRead("rgb_pixel_lzw.tif")
+    let back = rasTRoundTrip(rgb, "rgb.tif", compression: "lzw", type: "uint8")
+    expect(back.raster.bands.count == 3)
+    expect(back.raster.bands[1] == rgb.raster.bands[1])
+    let i16 = rasTRead("i16_nodata.tif")
+    for type in ["int16", "int32", "float64"] {
+        let b = rasTRoundTrip(i16, "i16_{type}.tif", compression: "deflate", type: type)
+        expect(b.raster.noData == -32768.0, "{type}: no-data")
+        expect(b.raster.lows == i16.raster.lows && b.raster.highs == i16.raster.highs, "{type}: range")
+        var same = true
+        for i in 0..i16.raster.bands[0].count {
+            let x = i16.raster.bands[0][i]
+            let y = b.raster.bands[0][i]
+            if !(x == y || (x.isNaN && y.isNaN)) {
+                same = false
+            }
+        }
+        expect(same, "{type}: values")
+    }
+    // Rounded and clamped into the type.
+    let box = cartography.boxOf(minX: 0.0, minY: 0.0, maxX: 3.0, maxY: 1.0)
+    let small = cartography.rasterLayer(name: "s", raster: cartography.makeRaster(width: 3, height: 1, bands: [[-3.6, 2.5, 400.0]], box: box), crs: cartography.lonLat())
+    let u8 = rasTRoundTrip(small, "clamped.tif", compression: "none", type: "uint8")
+    expect(u8.raster.bands[0] == [0.0, 3.0, 255.0], "clamped: {u8.raster.bands[0][0]} {u8.raster.bands[0][1]} {u8.raster.bands[0][2]}")
+    expect(u8.crs.code == 4326)
+    match cartography.writeGeoTIFF(small, rasTTemp("bad.tif"), type: "complex64") {
+        .ok(_) -> fail("an unknown type writes")
+        .failure(_) -> {}
+    }
+}
+
+test "GeoTIFF without an EPSG code gets a .prj" {
+    let layer = rasTRead("crs_custom_lcc.tif")
+    let back = rasTRoundTrip(layer, "lcc.tif", compression: "deflate", type: "int16")
+    let (lon, lat) = back.crs.toWGS84(10000.0, 390000.0)
+    let (lon0, lat0) = layer.crs.toWGS84(10000.0, 390000.0)
+    expect(abs(lon - lon0) < 0.000000001 && abs(lat - lat0) < 0.000000001)
+}
+
+test "ASCII grid written and read back" {
+    let dem = rasTRead("dem.asc")
+    let path = rasTTemp("dem.asc")
+    match cartography.writeAsciiGrid(dem, path) {
+        .ok(_) -> {}
+        .failure(e) -> fail(e.message)
+    }
+    match cartography.readAsciiGrid(path) {
+        .ok(back) -> {
+            expect(back.raster.width == 60 && back.raster.height == 45)
+            expect(back.crs.code == 32651 || back.crs.proj() == dem.crs.proj())
+            expect(back.raster.box.minY == dem.raster.box.minY)
+            var worst = 0.0
+            var holes = 0
+            for i in 0..dem.raster.bands[0].count {
+                let a = dem.raster.bands[0][i]
+                let b = back.raster.bands[0][i]
+                if a.isNaN {
+                    holes += 1
+                    expect(b.isNaN)
+                } else {
+                    worst = max(worst, abs(a - b))
+                }
+            }
+            expect(holes == 12 && worst == 0.0, "holes {holes}, worst {worst}")
+        }
+        .failure(e) -> fail(e.message)
+    }
+}
+
+// ----- rendering -----
+
+fn rasTSmall(_ values: [Float], width: Int) -> cartography.Layer {
+    let h = values.count / width
+    let box = cartography.boxOf(minX: 0.0, minY: 0.0, maxX: Float(width), maxY: Float(h))
+    cartography.rasterLayer(name: "small", raster: cartography.makeRaster(width: width, height: h, bands: [values], box: box), crs: cartography.lonLat())
+}
+
+fn rasTGray(_ v: Int) -> Int {
+    v * 16777216 + v * 65536 + v * 256 + 255
+}
+
+test "gray, from low to high, with see-through holes" {
+    var layer = rasTSmall([0.0, 1.0, 2.0, 0.0 / 0.0], width: 2)
+    layer.rasterStyle = cartography.RasterStyle(look: .gray, low: 0.0, high: 2.0)
+    let r = cartography.renderRaster(layer, cartography.lonLat())
+    expect(r.pixelWidth == 2 && r.pixelHeight == 2)
+    expect(r.pixelBox.minX == 0.0 && r.pixelBox.maxY == 2.0)
+    expect(r.pixels == [rasTGray(0), rasTGray(128), rasTGray(255), 0])
+    // Turned around.
+    layer.rasterStyle.invert = true
+    expect(cartography.renderRaster(layer, cartography.lonLat()).pixels == [rasTGray(255), rasTGray(127), rasTGray(0), 0])
+    // Gamma 2 brings out the low values: the middle is sqrt(0.5) of the way.
+    layer.rasterStyle.invert = false
+    layer.rasterStyle.gamma = 2.0
+    expect(cartography.renderRaster(layer, cartography.lonLat()).pixels[1] == rasTGray(Int(sqrt(128.0 / 255.0) * 255.0 + 0.5)))
+}
+
+test "ramp colors, custom colors and classes" {
+    var layer = rasTSmall([0.0, 5.0, 10.0, 2.0], width: 4)
+    layer.rasterStyle = cartography.rampRasterStyle(layer, ramp: "Viridis")
+    expect(layer.rasterStyle.low == 0.0 && layer.rasterStyle.high == 10.0)
+    let r = cartography.renderRaster(layer, cartography.lonLat())
+    let first = cartography.rampColor("Viridis", 0.0)
+    let last = cartography.rampColor("Viridis", 1.0)
+    expect(r.pixels[0] == first.r * 16777216 + first.g * 65536 + first.b * 256 + 255)
+    expect(r.pixels[2] == last.r * 16777216 + last.g * 65536 + last.b * 256 + 255)
+    layer.rasterStyle.colors = [cartography.rgb(0, 0, 255), cartography.rgb(255, 0, 0)]
+    let c = cartography.renderRaster(layer, cartography.lonLat())
+    expect(c.pixels[0] == 255 * 256 + 255 && c.pixels[2] == 255 * 16777216 + 255)
+    // Two classes: below the middle all blue, above all red.
+    layer.rasterStyle.classes = 2
+    let k = cartography.renderRaster(layer, cartography.lonLat())
+    expect(k.pixels[3] == k.pixels[0] && k.pixels[1] == k.pixels[2])
+}
+
+test "RGB pictures and hillshade" {
+    let rgb = rasTRead("rgb_pixel_lzw.tif")
+    let r = cartography.renderRaster(rgb, rgb.crs)
+    // Cell 1: 7, 36, 65.
+    expect(r.pixels[1] == 7 * 16777216 + 36 * 65536 + 65 * 256 + 255)
+    var dem = rasTRead("dem.tif")
+    dem.rasterStyle.look = .hillshade
+    let shaded = cartography.renderRaster(dem, dem.crs)
+    let hs = cartography.hillshade(dem).raster.bands[0]
+    let v = Int(hs[100] + 0.5)
+    expect(shaded.pixels[100] == rasTGray(v))
+}
+
+test "big rasters are drawn at most 2048 pixels across" {
+    var values: [Float] = []
+    for i in 0..(3000 * 4) {
+        values.append(Float(i % 3000))
+    }
+    let layer = rasTSmall(values, width: 3000)
+    let r = cartography.renderRaster(layer, cartography.lonLat())
+    expect(r.pixelWidth == 2048 && r.pixelHeight == 3)
+    expect(r.pixels.count == 2048 * 3)
+}
+
+test "warped into another coordinate system" {
+    var dem = rasTRead("dem.tif")
+    dem.rasterStyle = cartography.rampRasterStyle(dem)
+    let ll = cartography.lonLat()
+    let r = cartography.renderRaster(dem, ll)
+    let box = cartography.boxInCrs(dem.raster.box, from: dem.crs, to: ll)
+    expect(r.pixelBox.minX == box.minX && r.pixelBox.maxY == box.maxY)
+    expect(r.pixelWidth > 0 && r.pixelHeight > 0 && r.pixels.count == r.pixelWidth * r.pixelHeight)
+    expect(r.pixelWidth <= 2048 && r.pixelHeight <= 2048)
+    // Each pixel has the color of the cell under its center (checked away
+    // from cell edges, where a little rounding may pick the neighbour).
+    let flat = cartography.renderRaster(dem, dem.crs)
+    var checked = 0
+    var wrong = 0
+    let px = r.pixelBox.width() / Float(r.pixelWidth)
+    let py = r.pixelBox.height() / Float(r.pixelHeight)
+    var oy = 1
+    while oy < r.pixelHeight {
+        var ox = 1
+        while ox < r.pixelWidth {
+            let lon = r.pixelBox.minX + (Float(ox) + 0.5) * px
+            let lat = r.pixelBox.maxY - (Float(oy) + 0.5) * py
+            let (x, y) = geodesy.transform(lon, lat, from: ll, to: dem.crs)
+            let u = (x - dem.raster.box.minX) / 30.0
+            let v = (dem.raster.box.maxY - y) / 30.0
+            let fu = u - floor(u)
+            let fv = v - floor(v)
+            let pixel = r.pixels[oy * r.pixelWidth + ox]
+            if u >= 0.0 && v >= 0.0 && u < 60.0 && v < 45.0 && fu > 0.1 && fu < 0.9 && fv > 0.1 && fv < 0.9 {
+                checked += 1
+                if pixel != flat.pixels[Int(v) * 60 + Int(u)] {
+                    wrong += 1
+                }
+            } else if u < -0.5 || v < -0.5 || u > 60.5 || v > 45.5 {
+                expect(pixel == 0, "outside the raster: see-through")
+            }
+            ox += 3
+        }
+        oy += 3
+    }
+    expect(checked > 50 && wrong == 0, "{wrong} of {checked} pixels")
+}
+
+test "a map draws a raster layer in its own system" {
+    var m = cartography.Map()
+    m.add(rasTRead("dem.tif"))
+    let r = m.layers[0].raster
+    expect(r.pixels.count == r.pixelWidth * r.pixelHeight && r.pixelWidth > 0)
+    let b = cartography.boxInCrs(m.layers[0].raster.box, from: m.layers[0].crs, to: m.crs)
+    expect(r.pixelBox.minX == b.minX)
+    expect(!m.extent().empty)
+}

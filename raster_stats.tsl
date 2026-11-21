@@ -1,0 +1,191 @@
+// cartography: rasters, numbers about a raster's values: statistics of a
+// band, a histogram, the statistics of the cells inside polygons, and the
+// values at points. Ported from Meridian's raster/stats.tsl.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+/// What a set of cells' values are like: how many cells have a value,
+/// the smallest and largest, their mean and their standard deviation (of
+/// these cells themselves, not an estimate for a larger population), and
+/// their sum. With no cells, `count` is 0 and the others are NaN.
+public struct RasterStats {
+    count: Int = 0
+    min: Float = 0.0 / 0.0
+    max: Float = 0.0 / 0.0
+    mean: Float = 0.0 / 0.0
+    stddev: Float = 0.0 / 0.0
+    sum: Float = 0.0 / 0.0
+}
+
+/// Adds values up for `RasterStats`.
+struct RasTally {
+    count: Int = 0
+    lo: Float = 0.0
+    hi: Float = 0.0
+    /// The first value: sums are of the differences from it, which keeps
+    /// them precise when the values are large and close together.
+    origin: Float = 0.0
+    sum: Float = 0.0
+    squares: Float = 0.0
+
+    fn add(_ v: Float) {
+        if count == 0 {
+            origin = v
+            lo = v
+            hi = v
+        } else {
+            if v < lo { lo = v }
+            if v > hi { hi = v }
+        }
+        let d = v - origin
+        sum += d
+        squares += d * d
+        count += 1
+    }
+
+    fn result() -> RasterStats {
+        if count == 0 {
+            return RasterStats()
+        }
+        let n = Float(count)
+        let m = sum / n
+        let variance = max(0.0, squares / n - m * m)
+        RasterStats(count: count, min: lo, max: hi, mean: origin + m, stddev: sqrt(variance), sum: origin * n + sum)
+    }
+}
+
+/// The statistics of a band's values (`band` counts from 0). Cells without
+/// a value don't count.
+public fn rasterStatistics(_ r: Raster, band: Int = 0) -> RasterStats {
+    if band < 0 || band >= r.bands.count {
+        return RasterStats()
+    }
+    var tally = RasTally()
+    for v in r.bands[band] {
+        if v.isFinite {
+            tally.add(v)
+        }
+    }
+    tally.result()
+}
+
+/// How many cells of a band have a value in each of `bins` equal steps
+/// from `low` to `high` (left out: the band's smallest and largest value).
+/// The last bin includes `high`; values outside aren't counted.
+public fn rasterHistogram(_ r: Raster, band: Int = 0, bins: Int = 256, low: Float = 0.0 / 0.0, high: Float = 0.0 / 0.0) -> [Int] {
+    var counts: [Int] = []
+    if band < 0 || band >= r.bands.count || bins <= 0 {
+        return counts
+    }
+    for _ in 0..bins {
+        counts.append(0)
+    }
+    var lo = low
+    var hi = high
+    if lo.isNaN || hi.isNaN {
+        let (a, b) = rasRange(r.bands[band])
+        if lo.isNaN { lo = a }
+        if hi.isNaN { hi = b }
+    }
+    if lo.isNaN || hi.isNaN || hi < lo {
+        return counts
+    }
+    let scale = if hi > lo { Float(bins) / (hi - lo) } else { 0.0 }
+    for v in r.bands[band] {
+        if v.isFinite && v >= lo && v <= hi {
+            let k = min(bins - 1, Int((v - lo) * scale))
+            counts[k] += 1
+        }
+    }
+    counts
+}
+
+/// The values of a band at points (`points` is x, y, x, y, … in the
+/// raster's CRS): the value of the cell each point is in, NaN outside the
+/// raster and where the cell has no value.
+public fn sampleRaster(_ r: Raster, points: [Float], band: Int = 0) -> [Float] {
+    var out: [Float] = []
+    let none = 0.0 / 0.0
+    let ok = band >= 0 && band < r.bands.count
+    var i = 0
+    while i + 1 < points.count {
+        let at = if ok { rasCellIndex(r, points[i], points[i + 1]) } else { -1 }
+        out.append(if at >= 0 && at < r.bands[band].count { r.bands[band][at] } else { none })
+        i += 2
+    }
+    out
+}
+
+/// For each polygon of `zones` (in the raster's CRS), the
+/// statistics of the cells of a band whose centers are inside it; holes
+/// are left out. A zone that isn't a polygon, or holds no cell center,
+/// gets a count of 0.
+public fn zonalStatistics(_ r: Raster, zones: [Geometry], band: Int = 0) -> [RasterStats] {
+    var out: [RasterStats] = []
+    let w = r.width
+    let h = r.height
+    let usable = band >= 0 && band < r.bands.count && w > 0 && h > 0 && !r.box.empty && r.bands[band].count >= w * h
+    let cellX = r.box.width() / Float(max(1, w))
+    let cellY = r.box.height() / Float(max(1, h))
+    let left = r.box.minX
+    let top = r.box.maxY
+    for zone in zones {
+        var tally = RasTally()
+        if usable && zone.kind == .polygon && !zone.isEmpty() && zone.box.intersects(r.box) {
+            // The rows whose centers are between the zone's bottom and top.
+            let rowFrom = max(0, Int(floor((top - zone.box.maxY) / cellY - 0.5)))
+            let rowTo = min(h - 1, Int(ceil((top - zone.box.minY) / cellY - 0.5)))
+            // For each of them, where its center line crosses the zone's edges.
+            var crossings: [[Float]] = []
+            for _ in rowFrom..(rowTo + 1) {
+                crossings.append([])
+            }
+            for ring in zone.parts {
+                var i = 0
+                while i + 3 < ring.count {
+                    let (x1, y1, x2, y2) = (ring[i], ring[i + 1], ring[i + 2], ring[i + 3])
+                    i += 2
+                    if y1 == y2 {
+                        continue
+                    }
+                    let a = max(rowFrom, Int(floor((top - max(y1, y2)) / cellY - 0.5)) - 1)
+                    let b = min(rowTo, Int(ceil((top - min(y1, y2)) / cellY - 0.5)) + 1)
+                    var row = a
+                    while row <= b {
+                        let y = top - (Float(row) + 0.5) * cellY
+                        if (y1 > y) != (y2 > y) {
+                            crossings[row - rowFrom].append(x1 + (y - y1) * (x2 - x1) / (y2 - y1))
+                        }
+                        row += 1
+                    }
+                }
+            }
+            // Between the first and second crossing, the third and fourth, …
+            // a row is inside.
+            for row in rowFrom..(rowTo + 1) {
+                if crossings[row - rowFrom].count < 2 {
+                    continue
+                }
+                let xs = crossings[row - rowFrom].sorted()
+                var k = 0
+                while k + 1 < xs.count {
+                    var col = max(0, Int(floor((xs[k] - left) / cellX - 0.5)) - 1)
+                    while col < w && left + (Float(col) + 0.5) * cellX < xs[k] {
+                        col += 1
+                    }
+                    while col < w && left + (Float(col) + 0.5) * cellX < xs[k + 1] {
+                        let v = r.bands[band][row * w + col]
+                        if v.isFinite {
+                            tally.add(v)
+                        }
+                        col += 1
+                    }
+                    k += 2
+                }
+            }
+        }
+        out.append(tally.result())
+    }
+    out
+}

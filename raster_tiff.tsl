@@ -1,0 +1,1061 @@
+// cartography: rasters, reading GeoTIFF. The tags of a TIFF file, its
+// strips or tiles of cells (packed in several ways), and the GeoTIFF tags
+// that say where on the Earth the cells are. Ported from Meridian's
+// raster/tiff.tsl.
+//
+// What is read: classic TIFF of either byte order; strips and tiles; no
+// compression, LZW, Deflate and PackBits; predictors 1, 2 and 3; whole
+// numbers of 8, 16, 32 and 64 bits with or without a sign, decimal numbers
+// of 32 and 64 bits, and 1, 2 or 4 bit pictures of one band; any number of
+// bands, kept together or apart; palettes; a transparency band; the
+// no-data value GDAL writes. Where the picture is comes from the pixel
+// scale and tie point, the transformation matrix (also with its rows from
+// the bottom up) or a world file; its CRS from the EPSG code in the
+// GeoTIFF keys, a `.prj` file, or the projection the keys describe.
+// Not read: BigTIFF, JPEG and the other compressions, rotated pictures,
+// the first picture's overviews and masks (they are skipped).
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+/// The tags of a TIFF file's first picture: for each its number, the type
+/// and count of its values, and where in the file they are.
+struct RasTifDir {
+    big: Bool = false
+    tags: [Int] = []
+    kinds: [Int] = []
+    counts: [Int] = []
+    places: [Int] = []
+
+    fn find(_ tag: Int) -> Int {
+        for i in 0..tags.count {
+            if tags[i] == tag {
+                return i
+            }
+        }
+        -1
+    }
+
+    fn has(_ tag: Int) -> Bool {
+        find(tag) >= 0
+    }
+}
+
+/// How many bytes a value of a TIFF type takes (0: a type unknown here).
+fn rasTifTypeSize(_ kind: Int) -> Int {
+    match kind {
+        1 -> 1
+        2 -> 1
+        3 -> 2
+        4 -> 4
+        5 -> 8
+        6 -> 1
+        7 -> 1
+        8 -> 2
+        9 -> 4
+        10 -> 8
+        11 -> 4
+        12 -> 8
+        13 -> 4
+        _ -> 0
+    }
+}
+
+fn rasTifFail(_ message: String) -> Result<RasterFile> {
+    Result.failure(error: Error(message))
+}
+
+/// Reads the header and the first directory of tags.
+fn rasTifDirectory(_ d: Data, name: String) -> Result<RasTifDir> {
+    if d.count < 8 {
+        return .failure(error: Error("{name} isn't a TIFF file"))
+    }
+    var dir = RasTifDir()
+    if d[0] == 77 && d[1] == 77 {
+        dir.big = true
+    } else if d[0] != 73 || d[1] != 73 {
+        return .failure(error: Error("{name} isn't a TIFF file"))
+    }
+    let big = dir.big
+    let magic = d.uint16(at: 2, bigEndian: big)
+    if magic == 43 {
+        return .failure(error: Error("{name} is a BigTIFF, which cartography can't read yet"))
+    }
+    if magic != 42 {
+        return .failure(error: Error("{name} isn't a TIFF file"))
+    }
+    let at = d.uint32(at: 4, bigEndian: big)
+    if at + 2 > d.count {
+        return .failure(error: Error("{name} is cut short: its list of tags is missing"))
+    }
+    let n = d.uint16(at: at, bigEndian: big)
+    if at + 2 + n * 12 > d.count {
+        return .failure(error: Error("{name} is cut short: its list of tags is incomplete"))
+    }
+    for i in 0..n {
+        let e = at + 2 + i * 12
+        let kind = d.uint16(at: e + 2, bigEndian: big)
+        let count = d.uint32(at: e + 4, bigEndian: big)
+        let size = rasTifTypeSize(kind) * count
+        dir.tags.append(d.uint16(at: e, bigEndian: big))
+        dir.kinds.append(kind)
+        dir.counts.append(count)
+        dir.places.append(if size <= 4 { e + 8 } else { d.uint32(at: e + 8, bigEndian: big) })
+    }
+    Result.ok(value: dir)
+}
+
+/// The values of a tag as numbers (empty if the file doesn't have the tag,
+/// or its values would be outside the file).
+fn rasTifNumbers(_ d: Data, _ dir: RasTifDir, _ tag: Int) -> [Float] {
+    var out: [Float] = []
+    let i = dir.find(tag)
+    if i < 0 {
+        return out
+    }
+    let kind = dir.kinds[i]
+    let size = rasTifTypeSize(kind)
+    let n = dir.counts[i]
+    var p = dir.places[i]
+    if size == 0 || p < 0 || p + size * n > d.count {
+        return out
+    }
+    let big = dir.big
+    for _ in 0..n {
+        var v = 0.0
+        if kind == 3 {
+            v = Float(d.uint16(at: p, bigEndian: big))
+        } else if kind == 4 || kind == 13 {
+            v = Float(d.uint32(at: p, bigEndian: big))
+        } else if kind == 12 {
+            v = d.float64(at: p, bigEndian: big)
+        } else if kind == 1 || kind == 2 || kind == 7 {
+            v = Float(d[p])
+        } else if kind == 6 {
+            v = Float(d.int8(at: p))
+        } else if kind == 8 {
+            v = Float(d.int16(at: p, bigEndian: big))
+        } else if kind == 9 {
+            v = Float(d.int32(at: p, bigEndian: big))
+        } else if kind == 11 {
+            v = d.float32(at: p, bigEndian: big)
+        } else if kind == 5 {
+            v = Float(d.uint32(at: p, bigEndian: big)) / Float(d.uint32(at: p + 4, bigEndian: big))
+        } else if kind == 10 {
+            v = Float(d.int32(at: p, bigEndian: big)) / Float(d.int32(at: p + 4, bigEndian: big))
+        }
+        out.append(v)
+        p += size
+    }
+    out
+}
+
+/// A tag's first value as a whole number, or `otherwise`.
+fn rasTifInt(_ d: Data, _ dir: RasTifDir, _ tag: Int, _ otherwise: Int) -> Int {
+    let all = rasTifNumbers(d, dir, tag)
+    if all.isEmpty || !all[0].isFinite {
+        return otherwise
+    }
+    Int(all[0])
+}
+
+/// A tag's value as text.
+fn rasTifText(_ d: Data, _ dir: RasTifDir, _ tag: Int) -> String {
+    let i = dir.find(tag)
+    if i < 0 {
+        return ""
+    }
+    let p = dir.places[i]
+    let n = dir.counts[i]
+    if rasTifTypeSize(dir.kinds[i]) != 1 || p < 0 || p + n > d.count {
+        return ""
+    }
+    d.slice(from: p, to: p + n).latin1
+}
+
+fn rasTifCompressionName(_ c: Int) -> String {
+    match c {
+        2 -> "compressed as a fax (CCITT RLE)"
+        3 -> "compressed as a fax (CCITT Group 3)"
+        4 -> "compressed as a fax (CCITT Group 4)"
+        6 -> "JPEG-compressed"
+        7 -> "JPEG-compressed"
+        34712 -> "JPEG 2000-compressed"
+        34887 -> "LERC-compressed"
+        34925 -> "LZMA-compressed"
+        50000 -> "Zstandard-compressed"
+        50001 -> "WebP-compressed"
+        50002 -> "JPEG XL-compressed"
+        _ -> "compressed in a way (number {c})"
+    }
+}
+
+/// The bytes of one strip or tile, ready to take numbers from: `data` from
+/// `base` on, with `big` for the byte order they are in now.
+struct RasTifChunk {
+    data: Data = Data()
+    base: Int = 0
+    big: Bool = false
+    ok: Bool = true
+}
+
+/// Undoes predictor 2: every sample is stored as its difference from the
+/// one `spp` samples before it in its row. `bytes` holds whole rows of
+/// `rowSamples` samples of `size` bytes.
+fn rasTifUndoDifferences(_ bytes: [Int], rowSamples: Int, spp: Int, size: Int, big: Bool) -> [Int] {
+    var b = bytes
+    let rowBytes = rowSamples * size
+    if rowBytes == 0 {
+        return b
+    }
+    let rows = b.count / rowBytes
+    let back = spp * size
+    for r in 0..rows {
+        var i = r * rowBytes + back
+        let end = (r + 1) * rowBytes
+        if size == 1 {
+            while i < end {
+                b[i] = (b[i] + b[i - back]) % 256
+                i += 1
+            }
+        } else {
+            while i < end {
+                // Add the bytes from the least significant one, carrying.
+                var carry = 0
+                var k = 0
+                while k < size {
+                    let at = if big { i + size - 1 - k } else { i + k }
+                    let sum = b[at] + b[at - back] + carry
+                    b[at] = sum % 256
+                    carry = sum / 256
+                    k += 1
+                }
+                i += size
+            }
+        }
+    }
+    b
+}
+
+/// Undoes predictor 3, the one for decimal numbers: in a row, first the
+/// most significant byte of every sample, then the next, …, and all of it
+/// as differences from the byte `spp` before. Gives the samples with their
+/// most significant byte first.
+fn rasTifUndoFloatPredictor(_ bytes: [Int], rowSamples: Int, spp: Int, size: Int) -> [Int] {
+    var b = bytes
+    var out: [Int] = []
+    let rowBytes = rowSamples * size
+    if rowBytes == 0 {
+        return out
+    }
+    let rows = b.count / rowBytes
+    for r in 0..rows {
+        let base = r * rowBytes
+        var i = base + spp
+        let end = base + rowBytes
+        while i < end {
+            b[i] = (b[i] + b[i - spp]) % 256
+            i += 1
+        }
+        var s = 0
+        while s < rowSamples {
+            var k = 0
+            while k < size {
+                out.append(b[base + k * rowSamples + s])
+                k += 1
+            }
+            s += 1
+        }
+    }
+    out
+}
+
+/// One strip or tile as it was before it was compressed: the `size` bytes
+/// at `from`, which unpack to `expected` bytes in rows of `rowSamples`
+/// samples of `sampleSize` bytes.
+fn rasTifChunk(_ d: Data, from: Int, size: Int, expected: Int, compression: Int, predictor: Int,
+            rowSamples: Int, spp: Int, sampleSize: Int, big: Bool) -> RasTifChunk {
+    let bad = RasTifChunk(ok: false)
+    if from < 0 || size < 0 || from + size > d.count {
+        return bad
+    }
+    var bytes: [Int] = []
+    var haveBytes = false
+    var data = Data()
+    if compression == 1 {
+        if size < expected {
+            return bad
+        }
+        if predictor == 1 {
+            return RasTifChunk(data: d, base: from, big: big)
+        }
+        data = d.slice(from: from, to: from + expected)
+    } else if compression == 5 {
+        if rasLzwIsOldStyle(d, from: from, to: from + size) {
+            return bad
+        }
+        bytes = rasLzwDecode(d, from: from, to: from + size, expected: expected)
+        haveBytes = true
+    } else if compression == 32773 {
+        bytes = rasUnpackBits(d, from: from, to: from + size, expected: expected)
+        haveBytes = true
+    } else {
+        let packed = d.slice(from: from, to: from + size)
+        if let plain = packed.decompressed("zlib") {
+            data = plain
+        } else if let plain = packed.decompressed("deflate") {
+            data = plain
+        } else {
+            return bad
+        }
+    }
+    if predictor == 1 {
+        if haveBytes {
+            data = Data(bytes: bytes)
+        }
+        return RasTifChunk(data: data, base: 0, big: big, ok: data.count >= expected)
+    }
+    if !haveBytes {
+        bytes = data.bytes
+    }
+    if bytes.count < expected {
+        return bad
+    }
+    if predictor == 2 {
+        let plain = rasTifUndoDifferences(bytes, rowSamples: rowSamples, spp: spp, size: sampleSize, big: big)
+        return RasTifChunk(data: Data(bytes: plain), base: 0, big: big)
+    }
+    let plain = rasTifUndoFloatPredictor(bytes, rowSamples: rowSamples, spp: spp, size: sampleSize)
+    RasTifChunk(data: Data(bytes: plain), base: 0, big: true)
+}
+
+/// The cells being read: every band's values, row by row.
+struct RasTifGrid {
+    bands: [[Float]] = []
+    lows: [Float] = []
+    highs: [Float] = []
+
+    /// Takes `count` numbers from `src`, the first at byte `at` and the
+    /// others `stride` bytes apart, into `band` from cell `into` on. `mode`
+    /// says how a number is stored: 1 and 2 are whole numbers of 8 bits
+    /// without and with a sign, 3 and 4 of 16 bits, 5 and 6 of 32 bits,
+    /// 9 of 64 bits; 7 and 8 are decimal numbers of 32 and 64 bits.
+    fn take(src: Data, at: Int, mode: Int, big: Bool, band: Int, into: Int, count: Int, stride: Int) {
+        var p = at
+        var o = into
+        let end = into + count
+        if mode == 7 {
+            while o < end {
+                bands[band][o] = src.float32(at: p, bigEndian: big)
+                p += stride
+                o += 1
+            }
+        } else if mode == 1 {
+            while o < end {
+                bands[band][o] = Float(src[p])
+                p += stride
+                o += 1
+            }
+        } else if mode == 4 {
+            while o < end {
+                bands[band][o] = Float(src.int16(at: p, bigEndian: big))
+                p += stride
+                o += 1
+            }
+        } else if mode == 3 {
+            while o < end {
+                bands[band][o] = Float(src.uint16(at: p, bigEndian: big))
+                p += stride
+                o += 1
+            }
+        } else if mode == 8 {
+            while o < end {
+                bands[band][o] = src.float64(at: p, bigEndian: big)
+                p += stride
+                o += 1
+            }
+        } else if mode == 6 {
+            while o < end {
+                bands[band][o] = Float(src.int32(at: p, bigEndian: big))
+                p += stride
+                o += 1
+            }
+        } else if mode == 5 {
+            while o < end {
+                bands[band][o] = Float(src.uint32(at: p, bigEndian: big))
+                p += stride
+                o += 1
+            }
+        } else if mode == 2 {
+            while o < end {
+                bands[band][o] = Float(src.int8(at: p))
+                p += stride
+                o += 1
+            }
+        } else {
+            while o < end {
+                bands[band][o] = Float(src.int64(at: p, bigEndian: big))
+                p += stride
+                o += 1
+            }
+        }
+    }
+
+    /// The same for cells of 1, 2 or 4 bits, packed from the left of each
+    /// byte: `count` cells of the row that starts at byte `at`, from cell
+    /// `first` on, every `step`-th.
+    fn takeBits(src: Data, at: Int, bits: Int, first: Int, step: Int, into: Int, count: Int) {
+        let perByte = 8 / bits
+        let range = if bits == 1 { 2 } else if bits == 2 { 4 } else { 16 }
+        var x = first
+        for k in 0..count {
+            var v = src[at + x / perByte]
+            // Bring the cell to the right end of the byte, then cut it off.
+            var shifts = perByte - 1 - x % perByte
+            while shifts > 0 {
+                v = v / range
+                shifts -= 1
+            }
+            bands[0][into + k] = Float(v % range)
+            x += step
+        }
+    }
+
+    /// Turns every band upside down: the last row becomes the first.
+    fn flip(width: Int) {
+        if width <= 0 {
+            return
+        }
+        for b in 0..bands.count {
+            let rows = bands[b].count / width
+            var top = 0
+            var bottom = rows - 1
+            while top < bottom {
+                let a = top * width
+                let z = bottom * width
+                for i in 0..width {
+                    let kept = bands[b][a + i]
+                    bands[b][a + i] = bands[b][z + i]
+                    bands[b][z + i] = kept
+                }
+                top += 1
+                bottom -= 1
+            }
+        }
+    }
+
+    /// Where the alpha band (how opaque each cell is) is zero, the cells
+    /// of the other bands are nothing.
+    fn applyAlpha(_ alpha: Int) {
+        let none = 0.0 / 0.0
+        let n = bands[alpha].count
+        for b in 0..bands.count {
+            if b == alpha {
+                continue
+            }
+            for i in 0..n {
+                if bands[alpha][i] == 0.0 {
+                    bands[b][i] = none
+                }
+            }
+        }
+    }
+
+    /// Makes the cells with the no-data value NaN (`noData32` is the value
+    /// as a 32-bit number has it), turns the values around when white is
+    /// zero (`whiteIsZero` is then the largest value, otherwise negative),
+    /// and works out each band's smallest and largest value.
+    fn finish(noData: Float, noData32: Float, whiteIsZero: Float) {
+        let none = 0.0 / 0.0
+        lows = []
+        highs = []
+        let check = !noData.isNaN
+        for b in 0..bands.count {
+            let n = bands[b].count
+            var lo = 1.0 / 0.0
+            var hi = -1.0 / 0.0
+            var i = 0
+            while i < n {
+                var v = bands[b][i]
+                if check && (v == noData || v == noData32) {
+                    bands[b][i] = none
+                } else if v.isFinite {
+                    if whiteIsZero >= 0.0 {
+                        v = whiteIsZero - v
+                        bands[b][i] = v
+                    }
+                    if v < lo { lo = v }
+                    if v > hi { hi = v }
+                }
+                i += 1
+            }
+            lows.append(if lo <= hi { lo } else { none })
+            highs.append(if lo <= hi { hi } else { none })
+        }
+    }
+
+    /// Turns the one band of a palette picture into red, green and blue
+    /// bands: `colors` has every red, then every green, then every blue.
+    fn applyPalette(_ colors: [Float]) {
+        let size = colors.count / 3
+        var top = 0.0
+        for c in colors {
+            if c > top { top = c }
+        }
+        // Colors are stored from 0 to 65535 (but some files have 0 to 255).
+        let scale = if top > 255.0 { 257.0 } else { 1.0 }
+        let none = 0.0 / 0.0
+        let n = bands[0].count
+        var red: [Float] = []
+        var green: [Float] = []
+        var blue: [Float] = []
+        for i in 0..n {
+            let v = bands[0][i]
+            if v.isNaN || v < 0.0 || Int(v) >= size {
+                red.append(none)
+                green.append(none)
+                blue.append(none)
+            } else {
+                let k = Int(v)
+                red.append(floor(colors[k] / scale))
+                green.append(floor(colors[size + k] / scale))
+                blue.append(floor(colors[2 * size + k] / scale))
+            }
+        }
+        bands = [red, green, blue]
+    }
+}
+
+/// A number as a 32-bit decimal number holds it.
+fn rasTifAsFloat32(_ x: Float) -> Float {
+    if !x.isFinite {
+        return x
+    }
+    Data(bytes: x.bytes(count: 4)).float32(at: 0)
+}
+
+/// Reads a GeoTIFF file as a raster layer.
+fn rasTifRead(_ path: String, maxCells: Int) -> Result<RasterFile> {
+    let d = try readBytes(path)
+    let name = path.fileName
+    let dir = try rasTifDirectory(d, name: name)
+    var notes: [String] = []
+
+    // ----- what the cells are -----
+    let w = rasTifInt(d, dir, 256, 0)
+    let h = rasTifInt(d, dir, 257, 0)
+    if w <= 0 || h <= 0 {
+        return rasTifFail("{name} has no picture in it")
+    }
+    if w > 2_000_000 || h > 2_000_000 {
+        return rasTifFail("{name} says it has {w} × {h} cells, which is more than cartography can read")
+    }
+    let spp = max(1, rasTifInt(d, dir, 277, 1))
+    if spp > 1000 {
+        return rasTifFail("{name} says it has {spp} bands, which is more than cartography can read")
+    }
+    let bitsList = rasTifNumbers(d, dir, 258)
+    let bits = rasTifInt(d, dir, 258, 1)
+    for b in bitsList {
+        if Int(b) != bits {
+            return rasTifFail("the bands of {name} have different numbers of bits, which cartography can't read yet")
+        }
+    }
+    let formats = rasTifNumbers(d, dir, 339)
+    var format = rasTifInt(d, dir, 339, 1)
+    for f in formats {
+        if Int(f) != format {
+            return rasTifFail("the bands of {name} hold different kinds of numbers, which cartography can't read yet")
+        }
+    }
+    if format == 4 {
+        format = 1
+    }
+    let compression = rasTifInt(d, dir, 259, 1)
+    let photometric = rasTifInt(d, dir, 262, 1)
+    let planar = rasTifInt(d, dir, 284, 1)
+    let predictor = rasTifInt(d, dir, 317, 1)
+    if compression == 6 || compression == 7 {
+        return rasTifFail("this TIFF is JPEG-compressed, which cartography can't read yet")
+    }
+    if compression != 1 && compression != 5 && compression != 8 && compression != 32946 && compression != 32773 {
+        return rasTifFail("this TIFF is {rasTifCompressionName(compression)}, which cartography can't read yet")
+    }
+    if rasTifInt(d, dir, 266, 1) == 2 {
+        return rasTifFail("the bits of {name} are in reverse order, which cartography can't read yet")
+    }
+    if photometric == 6 {
+        return rasTifFail("the colors of {name} are stored as YCbCr, which cartography can't read yet")
+    }
+    var mode = 0
+    if format == 3 {
+        mode = if bits == 32 { 7 } else if bits == 64 { 8 } else { 0 }
+    } else if format == 2 {
+        mode = if bits == 8 { 2 } else if bits == 16 { 4 } else if bits == 32 { 6 } else if bits == 64 { 9 } else { 0 }
+    } else if format == 1 {
+        mode = if bits == 8 { 1 } else if bits == 16 { 3 } else if bits == 32 { 5 } else if bits == 64 { 9 } else { 0 }
+        if (bits == 1 || bits == 2 || bits == 4) && spp == 1 {
+            mode = 10
+        }
+    }
+    if mode == 0 {
+        let what = if format == 3 { "decimal numbers" } else if format == 2 || format == 1 { "whole numbers" } else { "complex numbers" }
+        return rasTifFail("{name} holds {what} of {bits} bits, which cartography can't read yet")
+    }
+    let sampleSize = bits / 8
+    if predictor != 1 && predictor != 2 && predictor != 3 {
+        return rasTifFail("{name} uses predictor {predictor}, which cartography can't read yet")
+    }
+    if (predictor == 2 && mode == 10) || (predictor == 3 && format != 3) {
+        return rasTifFail("{name} uses predictor {predictor} on cells of {bits} bits, which cartography can't read yet")
+    }
+
+    // ----- where the cells are in the file -----
+    let tiled = dir.has(322)
+    var cw = w
+    var ch = h
+    if tiled {
+        cw = rasTifInt(d, dir, 322, 0)
+        ch = rasTifInt(d, dir, 323, 0)
+    } else {
+        ch = rasTifInt(d, dir, 278, h)
+        if ch <= 0 || ch > h {
+            ch = h
+        }
+    }
+    if cw <= 0 || ch <= 0 || cw > 2_000_000 || ch > 2_000_000 {
+        return rasTifFail("{name} has tiles without a sensible size")
+    }
+    let piece = if tiled { "tile" } else { "strip" }
+    let places = rasTifNumbers(d, dir, if tiled { 324 } else { 273 })
+    let sizes = rasTifNumbers(d, dir, if tiled { 325 } else { 279 })
+    let across = (w + cw - 1) / cw
+    let down = (h + ch - 1) / ch
+    let planes = if planar == 2 { spp } else { 1 }
+    let together = if planar == 2 { 1 } else { spp }
+    if places.count < across * down * planes {
+        return rasTifFail("{name} is damaged: it has {places.count} {piece}s where {across * down * planes} are needed")
+    }
+
+    // ----- how much of it is read -----
+    var step = 1
+    var off = 0
+    var outW = w
+    var outH = h
+    while outW * outH > maxCells || outW * outH * spp > 3 * maxCells {
+        step += 1
+        off = step / 2
+        outW = (w - off + step - 1) / step
+        outH = (h - off + step - 1) / step
+    }
+    if step > 1 {
+        notes.append("{name} has {w} × {h} cells: read at 1/{step} of its resolution ({outW} × {outH})")
+    }
+    var grid = RasTifGrid()
+    let none = 0.0 / 0.0
+    var blank: [Float] = []
+    for _ in 0..(outW * outH) {
+        blank.append(none)
+    }
+    for _ in 0..spp {
+        grid.bands.append(blank)
+    }
+    blank = []
+
+    for plane in 0..planes {
+        for cy in 0..down {
+            let y0 = cy * ch
+            let endY = min(y0 + ch, h)
+            let firstY = y0 + ((off - y0 % step) % step + step) % step
+            if firstY >= endY {
+                continue
+            }
+            let rows = if tiled { ch } else { endY - y0 }
+            for cx in 0..across {
+                let x0 = cx * cw
+                let endX = min(x0 + cw, w)
+                let firstX = x0 + ((off - x0 % step) % step + step) % step
+                if firstX >= endX {
+                    continue
+                }
+                let index = plane * across * down + cy * across + cx
+                let rowBytes = if mode == 10 { (cw * bits + 7) / 8 } else { cw * together * sampleSize }
+                let expected = rowBytes * rows
+                let from = Int(places[index])
+                let size = if index < sizes.count { Int(sizes[index]) } else { d.count - from }
+                let chunk = rasTifChunk(d, from: from, size: size, expected: expected, compression: compression,
+                                     predictor: predictor, rowSamples: cw * together, spp: together,
+                                     sampleSize: sampleSize, big: dir.big)
+                if !chunk.ok {
+                    if compression == 5 && from >= 0 && from + size <= d.count && rasLzwIsOldStyle(d, from: from, to: from + size) {
+                        return rasTifFail("{name} uses the LZW of very old programs, which cartography can't read")
+                    }
+                    return rasTifFail("{name} is damaged: {piece} {index + 1} of {places.count} is cut short or can't be unpacked")
+                }
+                let nx = (endX - firstX + step - 1) / step
+                var y = firstY
+                while y < endY {
+                    let rowAt = chunk.base + (y - y0) * rowBytes
+                    let into = (y / step) * outW + firstX / step
+                    if mode == 10 {
+                        grid.takeBits(src: chunk.data, at: rowAt, bits: bits, first: firstX - x0, step: step, into: into, count: nx)
+                    } else if planar == 2 {
+                        grid.take(src: chunk.data, at: rowAt + (firstX - x0) * sampleSize, mode: mode, big: chunk.big,
+                                  band: plane, into: into, count: nx, stride: step * sampleSize)
+                    } else {
+                        for s in 0..spp {
+                            grid.take(src: chunk.data, at: rowAt + ((firstX - x0) * spp + s) * sampleSize, mode: mode,
+                                      big: chunk.big, band: s, into: into, count: nx, stride: step * spp * sampleSize)
+                        }
+                    }
+                    y += step
+                }
+            }
+        }
+    }
+
+    // ----- no-data, transparency, palette -----
+    var noData = none
+    if dir.has(42113) {
+        noData = Float(rasTifText(d, dir, 42113).trim()) ?? none
+    }
+    let extra = rasTifNumbers(d, dir, 338)
+    for (k, e) in extra.enumerated() {
+        let band = spp - extra.count + k
+        if (e == 1.0 || e == 2.0) && band > 0 && band < spp {
+            grid.applyAlpha(band)
+            break
+        }
+    }
+    var whiteIsZero = -1.0
+    if photometric == 0 && format == 1 && bits <= 8 && spp == 1 {
+        whiteIsZero = pow(2.0, Float(bits)) - 1.0
+    }
+    grid.finish(noData: noData, noData32: if mode == 7 { rasTifAsFloat32(noData) } else { noData }, whiteIsZero: whiteIsZero)
+    if photometric == 3 && spp == 1 {
+        let colors = rasTifNumbers(d, dir, 320)
+        if colors.count >= 3 {
+            grid.applyPalette(colors)
+            grid.finish(noData: none, noData32: none, whiteIsZero: -1.0)
+        } else {
+            notes.append("{name} is a palette picture without its palette: shown in gray")
+        }
+    }
+
+    // ----- where on the Earth -----
+    let keys = rasTifGeoKeys(d, dir)
+    let place = rasTifPlace(d, dir, path: path, width: w, height: h, pointCells: keys.rasterType == 2)
+    if place.error != "" {
+        return rasTifFail("{name} {place.error}")
+    }
+    if place.note != "" {
+        notes.append("{name} {place.note}")
+    }
+    var top = place.top
+    if place.flipped {
+        // Stored from the bottom up: turned over, so that the first row is
+        // the northernmost like everywhere else.
+        grid.flip(width: outW)
+        top = place.top - Float(h) * place.cellY + Float(outH * step) * place.cellY
+    }
+    let found = rasTifCrs(keys, path: path)
+    if found.note != "" {
+        notes.append("{name} {found.note}")
+    }
+    let box = boxOf(minX: place.left, minY: top - Float(outH * step) * place.cellY,
+                        maxX: place.left + Float(outW * step) * place.cellX, maxY: top)
+    var layer = Layer(name: rasStem(path) + (if step > 1 { " (1/{step} resolution)" } else { "" }),
+                          kind: .raster, source: path, crs: found.crs)
+    layer.raster = Raster(width: outW, height: outH, bands: grid.bands, box: box, noData: noData,
+                              lows: grid.lows, highs: grid.highs)
+    Result.ok(value: RasterFile(layer: layer, notes: notes))
+}
+
+/// What the GeoTIFF keys of a file say.
+struct RasTifGeoKeys {
+    present: Bool = false
+    /// 1: projected, 2: geographic, 3: geocentric, 32767: user-defined.
+    model: Int = 0
+    /// 1: a cell is an area, 2: a cell is a point (its center is where the
+    /// tie point says).
+    rasterType: Int = 1
+    geographic: Int = 0
+    projected: Int = 0
+    citation: String = ""
+    /// Every key that is a whole number, and every key that is a decimal one.
+    codes: [Int: Int] = [:]
+    numbers: [Int: Float] = [:]
+}
+
+fn rasTifGeoKeys(_ d: Data, _ dir: RasTifDir) -> RasTifGeoKeys {
+    var out = RasTifGeoKeys()
+    let keys = rasTifNumbers(d, dir, 34735)
+    if keys.count < 4 {
+        return out
+    }
+    out.present = true
+    let texts = rasTifText(d, dir, 34737)
+    let doubles = rasTifNumbers(d, dir, 34736)
+    let n = Int(keys[3])
+    for i in 0..n {
+        let at = 4 + i * 4
+        if at + 3 >= keys.count {
+            break
+        }
+        let id = Int(keys[at])
+        let place = Int(keys[at + 1])
+        let count = Int(keys[at + 2])
+        let value = Int(keys[at + 3])
+        if place == 34737 {
+            if id == 1026 || (id == 3073 && out.citation == "") || (id == 2049 && out.citation == "") {
+                var t = texts.substring(from: value, to: value + count)
+                if t.hasSuffix("|") {
+                    t = t.substring(from: 0, to: t.count - 1)
+                }
+                out.citation = t
+            }
+            continue
+        }
+        if place == 34736 {
+            if value >= 0 && value < doubles.count {
+                out.numbers[id] = doubles[value]
+            }
+            continue
+        }
+        if place != 0 {
+            continue
+        }
+        out.codes[id] = value
+        if id == 1024 {
+            out.model = value
+        } else if id == 1025 {
+            out.rasterType = value
+        } else if id == 2048 {
+            out.geographic = value
+        } else if id == 3072 {
+            out.projected = value
+        }
+    }
+    out
+}
+
+/// A CRS that was found for a file, and what there is to say about it.
+struct RasTifCrs {
+    crs: geodesy.Crs = geodesy.wgs84Crs()
+    note: String = ""
+}
+
+/// A number for a PROJ string.
+fn rasTifProjNumber(_ x: Float) -> String {
+    "{x}"
+}
+
+/// The CRS that keys without an EPSG code describe by its parts (the
+/// projection and its parameters, the datum or ellipsoid), as a PROJ
+/// string; "" if they don't, or in a way this doesn't know.
+fn rasTifProjString(_ keys: RasTifGeoKeys) -> String {
+    // The datum: of the geographic CRS's code, or by its own code, or
+    // just an ellipsoid.
+    var datum = ""
+    if keys.geographic > 0 && keys.geographic != 32767 {
+        if let g = geodesy.epsg(keys.geographic) {
+            for word in g.proj().split(" ") {
+                if word.hasPrefix("+datum=") || word.hasPrefix("+ellps=") || word.hasPrefix("+towgs84=") || word.hasPrefix("+a=") ||
+                    word.hasPrefix("+rf=") || word.hasPrefix("+pm=") {
+                    datum += " " + word
+                }
+            }
+        }
+    }
+    if datum == "" {
+        let code = keys.codes[2050] ?? 0
+        let ellipsoid = keys.codes[2056] ?? 0
+        if code == 6326 {
+            datum = " +datum=WGS84"
+        } else if code == 6269 {
+            datum = " +datum=NAD83"
+        } else if code == 6267 {
+            datum = " +datum=NAD27"
+        } else if ellipsoid == 7030 {
+            datum = " +ellps=WGS84"
+        } else if ellipsoid == 7019 {
+            datum = " +ellps=GRS80"
+        } else if ellipsoid == 7008 {
+            datum = " +ellps=clrk66"
+        } else if ellipsoid == 7004 {
+            datum = " +ellps=bessel"
+        } else if ellipsoid == 7022 {
+            datum = " +ellps=intl"
+        } else if let a = keys.numbers[2057] {
+            datum = " +a={rasTifProjNumber(a)}"
+            if let rf = keys.numbers[2059] {
+                datum += " +rf={rasTifProjNumber(rf)}"
+            } else if let b = keys.numbers[2058] {
+                datum += " +b={rasTifProjNumber(b)}"
+            }
+        } else {
+            datum = " +ellps=WGS84"
+        }
+    }
+    if keys.model == 2 {
+        return "+proj=longlat" + datum
+    }
+    // The unit of the coordinates (and of the false easting and northing).
+    let unit = keys.codes[3076] ?? 9001
+    var metres = 1.0
+    var units = " +units=m"
+    if unit == 9002 {
+        metres = 0.3048
+        units = " +units=ft"
+    } else if unit == 9003 {
+        metres = 0.3048006096012192
+        units = " +units=us-ft"
+    } else if unit != 9001 {
+        return ""
+    }
+    // A projection with a code: only the UTM zones are known here.
+    let projection = keys.codes[3074] ?? 32767
+    if projection >= 16001 && projection <= 16060 {
+        return "+proj=utm +zone={projection - 16000}" + datum + units
+    }
+    if projection >= 16101 && projection <= 16160 {
+        return "+proj=utm +zone={projection - 16100} +south" + datum + units
+    }
+    let method = keys.codes[3075] ?? 0
+    let get: fn(Int, Int, Float) -> Float = { first, second, otherwise in keys.numbers[first] ?? (keys.numbers[second] ?? otherwise) }
+    let x0 = " +x_0={rasTifProjNumber(get(3082, 3086, get(3090, 3090, 0.0)) * metres)}"
+    let y0 = " +y_0={rasTifProjNumber(get(3083, 3087, get(3091, 3091, 0.0)) * metres)}"
+    let lon0 = rasTifProjNumber(get(3080, 3084, get(3088, 3095, 0.0)))
+    let lat0 = rasTifProjNumber(get(3081, 3085, get(3089, 3089, 0.0)))
+    let k = rasTifProjNumber(get(3092, 3093, 1.0))
+    let lat1 = rasTifProjNumber(get(3078, 3078, get(3081, 3085, 0.0)))
+    let lat2 = rasTifProjNumber(get(3079, 3079, get(3078, 3078, 0.0)))
+    var text = ""
+    if method == 1 {
+        text = "+proj=tmerc +lat_0={lat0} +lon_0={lon0} +k={k}"
+    } else if method == 7 {
+        text = "+proj=merc +lon_0={lon0}" + (if keys.numbers.contains(key: 3078) { " +lat_ts={lat1}" } else { " +k={k}" })
+    } else if method == 8 {
+        text = "+proj=lcc +lat_1={lat1} +lat_2={lat2} +lat_0={lat0} +lon_0={lon0}"
+    } else if method == 9 {
+        text = "+proj=lcc +lat_1={lat0} +lat_0={lat0} +lon_0={lon0} +k_0={k}"
+    } else if method == 10 {
+        text = "+proj=laea +lat_0={lat0} +lon_0={lon0}"
+    } else if method == 11 {
+        text = "+proj=aea +lat_1={lat1} +lat_2={lat2} +lat_0={lat0} +lon_0={lon0}"
+    } else if method == 15 {
+        let pole = if get(3081, 3085, 90.0) < 0.0 { "-90" } else { "90" }
+        text = "+proj=stere +lat_0={pole} +lat_ts={lat0} +lon_0={rasTifProjNumber(get(3095, 3080, 0.0))}"
+    } else if method == 16 {
+        text = "+proj=sterea +lat_0={lat0} +lon_0={lon0} +k={k}"
+    } else if method == 17 {
+        text = "+proj=eqc +lat_ts={lat1} +lon_0={lon0}"
+    } else if method == 24 {
+        text = "+proj=sinu +lon_0={lon0}"
+    } else {
+        return ""
+    }
+    text + x0 + y0 + datum + units
+}
+
+/// The CRS the GeoTIFF keys name by its EPSG code, else the one of the
+/// `.prj` file beside the TIFF, else the one the keys describe by its
+/// parts, else WGS 84.
+fn rasTifCrs(_ keys: RasTifGeoKeys, path: String) -> RasTifCrs {
+    var code = 0
+    if keys.projected > 0 && keys.projected != 32767 {
+        code = keys.projected
+    } else if keys.geographic > 0 && keys.geographic != 32767 && keys.model != 1 {
+        code = keys.geographic
+    }
+    if code > 0 {
+        if let crs = geodesy.epsg(code) {
+            return RasTifCrs(crs: crs)
+        }
+    }
+    if let crs = rasSidecarCrs(path) {
+        return RasTifCrs(crs: crs)
+    }
+    if code > 0 {
+        return RasTifCrs(note: "is in EPSG:{code}, which cartography doesn't know: taken to be WGS 84")
+    }
+    if !keys.present || keys.model == 0 {
+        return RasTifCrs(note: "doesn't say what CRS it is in: taken to be WGS 84")
+    }
+    let text = rasTifProjString(keys)
+    if text != "" {
+        if let found = rasCrsFromText(text) {
+            var crs = found
+            if crs.code == 0 && keys.citation != "" {
+                crs.name = keys.citation
+            }
+            return RasTifCrs(crs: crs)
+        }
+    }
+    let what = if keys.citation != "" { " (\"{keys.citation}\")" } else { "" }
+    RasTifCrs(note: "has a CRS of its own{what} that cartography can't work out: taken to be WGS 84")
+}
+
+/// Where a picture is on the map: the map coordinates of its left and top
+/// edges, and the size of a cell. `flipped`: the file has its rows from
+/// the bottom up.
+struct RasTifPlace {
+    left: Float = 0.0
+    top: Float = 0.0
+    cellX: Float = 1.0
+    cellY: Float = 1.0
+    flipped: Bool = false
+    note: String = ""
+    error: String = ""
+}
+
+/// Where the TIFF's tags (or the world file beside it) put the picture.
+fn rasTifPlace(_ d: Data, _ dir: RasTifDir, path: String, width: Int, height: Int, pointCells: Bool) -> RasTifPlace {
+    let scale = rasTifNumbers(d, dir, 33550)
+    let tie = rasTifNumbers(d, dir, 33922)
+    let matrix = rasTifNumbers(d, dir, 34264)
+    var out = RasTifPlace()
+    // The y of the first row's outer edge (or of its center, for cells
+    // that are points), before it is known which way up the rows are.
+    var firstY = 0.0
+    if scale.count >= 2 && tie.count >= 6 && scale[0] != 0.0 && scale[1] != 0.0 {
+        out.cellX = abs(scale[0])
+        out.cellY = abs(scale[1])
+        out.left = tie[3] - tie[0] * out.cellX
+        firstY = tie[4] + tie[1] * out.cellY
+    } else if matrix.count >= 8 {
+        if matrix[1] != 0.0 || matrix[4] != 0.0 {
+            return RasTifPlace(error: "is rotated on the map, which cartography can't show yet")
+        }
+        if matrix[0] <= 0.0 || matrix[5] == 0.0 {
+            return RasTifPlace(error: "is mirrored on the map, which cartography can't show yet")
+        }
+        out.cellX = matrix[0]
+        out.cellY = abs(matrix[5])
+        out.flipped = matrix[5] > 0.0
+        out.left = matrix[3]
+        firstY = matrix[7]
+    } else {
+        let world = rasWorldFile(path)
+        if world.error != "" {
+            return RasTifPlace(error: world.error)
+        }
+        if !world.found {
+            return RasTifPlace(top: Float(height), note: "doesn't say where it is on the map: placed at 0, 0 with cells of size 1")
+        }
+        let top = if world.flipped { world.firstY + (Float(height) - 0.5) * world.cellY } else { world.firstY + world.cellY / 2.0 }
+        return RasTifPlace(left: world.left, top: top, cellX: world.cellX, cellY: world.cellY, flipped: world.flipped)
+    }
+    if !out.left.isFinite || !firstY.isFinite || !out.cellX.isFinite || !out.cellY.isFinite {
+        return RasTifPlace(error: "has a place on the map that isn't a number")
+    }
+    if pointCells {
+        // The tie point is the center of a cell, not its corner.
+        out.left -= out.cellX / 2.0
+        firstY += if out.flipped { -out.cellY / 2.0 } else { out.cellY / 2.0 }
+    }
+    out.top = if out.flipped { firstY + Float(height) * out.cellY } else { firstY }
+    out
+}

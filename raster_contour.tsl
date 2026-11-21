@@ -1,0 +1,346 @@
+// cartography: rasters, contour lines. The lines along which a grid of
+// values (elevations, usually) has the same value, found by marching
+// squares. A value belongs to the center of its cell, and between the
+// centers of neighbouring cells it is taken to change evenly (as
+// gdal_contour does). Ported from Meridian's raster/contour.tsl.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+// Follows contour lines through the squares between four cell centers.
+// A square is named by its top left cell (column, row); its sides are
+// numbered 0 (top), 1 (right), 2 (bottom), 3 (left).
+struct RasTracer {
+    z: [Float] = []
+    w: Int = 0
+    h: Int = 0
+    /// The map coordinates of the center of cell 0, 0 and the size of a cell.
+    x0: Float = 0.0
+    y0: Float = 0.0
+    cellX: Float = 1.0
+    cellY: Float = 1.0
+    /// For each side of a square (two per cell: the one to the right of its
+    /// center and the one below it), the level it was last followed at.
+    seen: [Int] = []
+
+    /// Whether the square exists and has a value at each corner.
+    fn valid(_ c: Int, _ r: Int) -> Bool {
+        if c < 0 || r < 0 || c >= w - 1 || r >= h - 1 {
+            return false
+        }
+        let i = r * w + c
+        !(z[i] + z[i + 1] + z[i + w] + z[i + w + 1]).isNaN
+    }
+
+    /// A number for a side that is the same from both squares it is a side of.
+    fn sideId(_ c: Int, _ r: Int, _ side: Int) -> Int {
+        match side {
+            0 -> 2 * (r * w + c)
+            1 -> 2 * (r * w + c + 1) + 1
+            2 -> 2 * ((r + 1) * w + c)
+            _ -> 2 * (r * w + c) + 1
+        }
+    }
+
+    /// Whether the level crosses a side: one end is below it, the other isn't.
+    fn crosses(_ c: Int, _ r: Int, _ side: Int, _ level: Float) -> Bool {
+        let i = r * w + c
+        match side {
+            0 -> (z[i] >= level) != (z[i + 1] >= level)
+            1 -> (z[i + 1] >= level) != (z[i + w + 1] >= level)
+            2 -> (z[i + w] >= level) != (z[i + w + 1] >= level)
+            _ -> (z[i] >= level) != (z[i + w] >= level)
+        }
+    }
+
+    /// Where on a side the level is.
+    fn point(_ c: Int, _ r: Int, _ side: Int, _ level: Float) -> (Float, Float) {
+        // The side's ends, always left to right or top to bottom, so that
+        // both squares it belongs to give the same point.
+        var c1 = c
+        var r1 = r
+        var across = true
+        if side == 1 {
+            c1 = c + 1
+            across = false
+        } else if side == 2 {
+            r1 = r + 1
+        } else if side == 3 {
+            across = false
+        }
+        let i = r1 * w + c1
+        let a = z[i]
+        let b = if across { z[i + 1] } else { z[i + w] }
+        var t = if b != a { (level - a) / (b - a) } else { 0.5 }
+        if t < 0.0 { t = 0.0 }
+        if t > 1.0 { t = 1.0 }
+        if across {
+            return (x0 + (Float(c1) + t) * cellX, y0 - Float(r1) * cellY)
+        }
+        (x0 + Float(c1) * cellX, y0 - (Float(r1) + t) * cellY)
+    }
+
+    /// The side by which the line that comes in by `entry` leaves the
+    /// square (-1: it doesn't).
+    fn leaves(_ c: Int, _ r: Int, _ entry: Int, _ level: Float) -> Int {
+        let i = r * w + c
+        let tl = z[i] >= level
+        let tr = z[i + 1] >= level
+        let bl = z[i + w] >= level
+        let br = z[i + w + 1] >= level
+        let top = tl != tr
+        let right = tr != br
+        let bottom = br != bl
+        let left = bl != tl
+        if top && right && bottom && left {
+            // A saddle: two lines cross the square. The value in the middle
+            // says which corners they cut off.
+            let middle = (z[i] + z[i + 1] + z[i + w] + z[i + w + 1]) / 4.0 >= level
+            if tl == middle {
+                return match entry {
+                    0 -> 1
+                    1 -> 0
+                    2 -> 3
+                    _ -> 2
+                }
+            }
+            return match entry {
+                0 -> 3
+                3 -> 0
+                1 -> 2
+                _ -> 1
+            }
+        }
+        if top && entry != 0 { return 0 }
+        if right && entry != 1 { return 1 }
+        if bottom && entry != 2 { return 2 }
+        if left && entry != 3 { return 3 }
+        -1
+    }
+
+    /// Follows the line that enters square `c`, `r` by `entry` until it
+    /// comes back to where it started, leaves the grid or meets a cell
+    /// without a value. Gives its points (x, y, …); a line that came back
+    /// ends with its first point. With `first` the entry point itself is
+    /// the first point.
+    fn walk(_ c: Int, _ r: Int, _ entry: Int, level: Float, mark: Int, first: Bool) -> [Float] {
+        var pts: [Float] = []
+        var col = c
+        var row = r
+        var side = entry
+        let start = sideId(c, r, entry)
+        if first {
+            let (x, y) = point(c, r, entry, level)
+            pts.append(x)
+            pts.append(y)
+            seen[start] = mark
+        }
+        while true {
+            let out = leaves(col, row, side, level)
+            if out < 0 {
+                break
+            }
+            let id = sideId(col, row, out)
+            let (x, y) = point(col, row, out, level)
+            let n = pts.count
+            if n < 2 || pts[n - 2] != x || pts[n - 1] != y {
+                pts.append(x)
+                pts.append(y)
+            }
+            if id == start {
+                // Around: make sure it ends exactly where it began.
+                if first && pts.count >= 4 && (pts[pts.count - 2] != pts[0] || pts[pts.count - 1] != pts[1]) {
+                    pts.append(pts[0])
+                    pts.append(pts[1])
+                }
+                break
+            }
+            if seen[id] == mark {
+                break
+            }
+            seen[id] = mark
+            if out == 0 {
+                row -= 1
+                side = 2
+            } else if out == 1 {
+                col += 1
+                side = 3
+            } else if out == 2 {
+                row += 1
+                side = 0
+            } else {
+                col -= 1
+                side = 1
+            }
+            if !valid(col, row) {
+                break
+            }
+        }
+        pts
+    }
+
+    /// The whole line through side `side` of square `c`, `r`.
+    fn trace(_ c: Int, _ r: Int, _ side: Int, level: Float, mark: Int) -> [Float] {
+        let start = sideId(c, r, side)
+        let ahead = walk(c, r, side, level: level, mark: mark, first: true)
+        let n = ahead.count
+        if n >= 6 && ahead[0] == ahead[n - 2] && ahead[1] == ahead[n - 1] {
+            return ahead
+        }
+        // It ended somewhere: follow it the other way from the start too.
+        var col = c
+        var row = r
+        var entry = 0
+        if side == 0 {
+            row -= 1
+            entry = 2
+        } else if side == 1 {
+            col += 1
+            entry = 3
+        } else if side == 2 {
+            row += 1
+            entry = 0
+        } else {
+            col -= 1
+            entry = 1
+        }
+        if !valid(col, row) {
+            return ahead
+        }
+        seen[start] = mark
+        let back = walk(col, row, entry, level: level, mark: mark, first: false)
+        var line: [Float] = []
+        var i = back.count - 2
+        while i >= 0 {
+            line.append(back[i])
+            line.append(back[i + 1])
+            i -= 2
+        }
+        var k = 0
+        if line.count >= 2 && n >= 2 && line[line.count - 2] == ahead[0] && line[line.count - 1] == ahead[1] {
+            k = 2
+        }
+        while k < n {
+            line.append(ahead[k])
+            k += 1
+        }
+        line
+    }
+}
+
+/// The contour lines of a band of a raster layer, as a line layer in the
+/// raster's CRS with the number column `elev`: one feature for each line,
+/// at the values `base`, `base` ± `interval`, `base` ± 2 × `interval`, …
+/// that the band reaches (`band` counts from 0; `name` is the new layer's
+/// name, "" for the raster's name with " contours"). Each line is whole: a
+/// closed one ends with its first point, an open one runs from edge to
+/// edge of the raster (or of its cells without a value). At most 5000
+/// levels are drawn.
+public fn contours(_ source: Layer, interval: Float, base: Float = 0.0, band: Int = 0, name: String = "") -> Layer {
+    let r = source.raster
+    let title = if !name.isEmpty { name } else if source.name.isEmpty { "Contours" } else { "{source.name} contours" }
+    var layer = newVectorLayer(name: title, geomKind: .line, crs: source.crs)
+    var geoms: [Geometry] = []
+    var elevs: [Float] = []
+    let w = r.width
+    let h = r.height
+    if band >= 0 && band < r.bands.count && w >= 2 && h >= 2 && r.bands[band].count >= w * h && interval > 0.0 && base.isFinite {
+        let z = r.bands[band]
+        let (lo, hi) = rasRange(z)
+        if lo.isFinite && hi.isFinite {
+            let kMin = Int(ceil((lo - base) / interval))
+            let kMax = min(Int(floor((hi - base) / interval)), kMin + 4999)
+            let levels = kMax - kMin + 1
+            if levels > 0 {
+                // Which squares each level goes through: counted, then listed.
+                var counts: [Int] = []
+                for _ in 0..(levels + 1) {
+                    counts.append(0)
+                }
+                for pass in 0..2 {
+                    var places: [Int] = []
+                    var squares: [Int] = []
+                    if pass == 1 {
+                        var total = 0
+                        for li in 0..levels {
+                            places.append(total)
+                            total += counts[li]
+                        }
+                        places.append(total)
+                        for _ in 0..total {
+                            squares.append(0)
+                        }
+                    }
+                    var fill = places
+                    for row in 0..(h - 1) {
+                        var i = row * w
+                        let end = i + w - 1
+                        while i < end {
+                            let a = z[i]
+                            let b = z[i + 1]
+                            let c = z[i + w]
+                            let d = z[i + w + 1]
+                            if !(a + b + c + d).isNaN {
+                                let least = min(min(a, b), min(c, d))
+                                let most = max(max(a, b), max(c, d))
+                                if most > least {
+                                    var k = max(kMin, Int(floor((least - base) / interval)) + 1)
+                                    let kEnd = min(kMax, Int(floor((most - base) / interval)))
+                                    while k <= kEnd {
+                                        if pass == 0 {
+                                            counts[k - kMin] += 1
+                                        } else {
+                                            squares[fill[k - kMin]] = i
+                                            fill[k - kMin] += 1
+                                        }
+                                        k += 1
+                                    }
+                                }
+                            }
+                            i += 1
+                        }
+                    }
+                    if pass == 0 {
+                        continue
+                    }
+                    var seen: [Int] = []
+                    for _ in 0..(2 * w * h) {
+                        seen.append(0)
+                    }
+                    let cellX = r.box.width() / Float(w)
+                    let cellY = r.box.height() / Float(h)
+                    var tracer = RasTracer(z: z, w: w, h: h, x0: r.box.minX + cellX / 2.0, y0: r.box.maxY - cellY / 2.0,
+                                           cellX: cellX, cellY: cellY, seen: seen)
+                    seen = []
+                    for li in 0..levels {
+                        let level = base + Float(kMin + li) * interval
+                        let mark = li + 1
+                        var at = places[li]
+                        let stop = places[li + 1]
+                        while at < stop {
+                            let cell = squares[at]
+                            let col = cell % w
+                            let row = cell / w
+                            for side in 0..4 {
+                                if tracer.crosses(col, row, side, level) && tracer.seen[tracer.sideId(col, row, side)] != mark {
+                                    let line = tracer.trace(col, row, side, level: level, mark: mark)
+                                    if line.count >= 4 {
+                                        geoms.append(lineGeometry(line))
+                                        elevs.append(level)
+                                    }
+                                }
+                            }
+                            at += 1
+                        }
+                    }
+                }
+            }
+        }
+    }
+    layer.geoms = geoms
+    layer.columns = [numberColumn(name: "elev", values: elevs)]
+    layer.style.symbol = defaultSymbol(.line, seed: 0)
+    layer
+}

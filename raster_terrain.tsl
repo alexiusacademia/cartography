@@ -1,0 +1,243 @@
+// cartography: rasters, terrain. Hillshade, slope and aspect of a grid of
+// elevations by Horn's method (the slopes west-east and north-south of a
+// cell are weighted differences of its eight neighbours), as gdaldem
+// works them out. Ported from Meridian's raster/terrain.tsl.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import geodesy
+
+// The width and height in metres of the cells of every row of a raster:
+// `[width of row 0, height of row 0, width of row 1, …]`. In a geographic
+// CRS a degree of longitude gets shorter towards the poles, so the rows
+// differ; the same goes for the stretched metres of a Mercator map.
+fn rasCellMetres(_ r: Raster, crs: geodesy.Crs) -> [Float] {
+    var out: [Float] = []
+    let cellX = r.box.width() / Float(max(1, r.width))
+    let cellY = r.box.height() / Float(max(1, r.height))
+    let rad = pi / 180.0
+    let ell = crs.ellipsoid()
+    let e2 = ell.f * (2.0 - ell.f)
+    let method = crs.projection.method
+    let mercator = method == "webmerc" || method == "merc"
+    for row in 0..r.height {
+        let y = r.box.maxY - (Float(row) + 0.5) * cellY
+        if crs.isGeographic() {
+            let lat = (y * crs.angleUnit).clamped(min: -89.9, max: 89.9) * rad
+            let s = sin(lat)
+            let q = 1.0 - e2 * s * s
+            let east = ell.a / sqrt(q) * cos(lat) * rad * crs.angleUnit
+            let north = ell.a * (1.0 - e2) / (q * sqrt(q)) * rad * crs.angleUnit
+            out.append(cellX * east)
+            out.append(cellY * north)
+        } else if mercator {
+            let (_, lat) = crs.toLonLat(r.box.centerX(), y)
+            let k = max(0.001, cos(lat * rad))
+            out.append(cellX * crs.toMeter * k)
+            out.append(cellY * crs.toMeter * k)
+        } else {
+            out.append(cellX * crs.toMeter)
+            out.append(cellY * crs.toMeter)
+        }
+    }
+    out
+}
+
+// The value of a cell, or NaN outside the grid.
+fn rasCell(_ z: [Float], _ w: Int, _ h: Int, _ col: Int, _ row: Int) -> Float {
+    if col < 0 || row < 0 || col >= w || row >= h {
+        return 0.0 / 0.0
+    }
+    z[row * w + col]
+}
+
+// A value outside the grid, going on straight from the edge cell `a` past
+// its inner neighbour `b` (NaN if either has none).
+fn rasBeyond(_ a: Float, _ b: Float) -> Float {
+    2.0 * a - b
+}
+
+// Hillshade (`what` 0: light from 0 to 255), slope (1: degrees) or aspect
+// (2: degrees clockwise from north of the way down, -1 where flat) of a
+// band of elevations.
+fn rasTerrain(_ r: Raster, crs: geodesy.Crs, band: Int, what: Int, azimuth: Float, altitude: Float, exaggeration: Float) -> [Float] {
+    var out: [Float] = []
+    let w = r.width
+    let h = r.height
+    if band < 0 || band >= r.bands.count || r.bands[band].count < w * h {
+        return out
+    }
+    let z = r.bands[band]
+    let metres = rasCellMetres(r, crs: crs)
+    let none = 0.0 / 0.0
+    let rad = pi / 180.0
+    let zenith = (90.0 - altitude) * rad
+    let sunAngle = (450.0 - azimuth) * rad
+    let cosZenith = cos(zenith)
+    let sinZenith = sin(zenith)
+    let sunX = cos(sunAngle)
+    let sunY = sin(sunAngle)
+    for row in 0..h {
+        let dx = 8.0 * metres[2 * row]
+        let dy = 8.0 * metres[2 * row + 1]
+        let inner = row > 0 && row < h - 1
+        for col in 0..w {
+            let i = row * w + col
+            let e = z[i]
+            if e.isNaN {
+                out.append(none)
+                continue
+            }
+            // The neighbours: a b c above, d and f beside, g k m below.
+            var a = 0.0
+            var b = 0.0
+            var c = 0.0
+            var d = 0.0
+            var f = 0.0
+            var g = 0.0
+            var k = 0.0
+            var m = 0.0
+            var whole = false
+            if inner && col > 0 && col < w - 1 {
+                a = z[i - w - 1]
+                b = z[i - w]
+                c = z[i - w + 1]
+                d = z[i - 1]
+                f = z[i + 1]
+                g = z[i + w - 1]
+                k = z[i + w]
+                m = z[i + w + 1]
+                whole = !(a + b + c + d + f + g + k + m).isNaN
+            } else if w >= 2 && h >= 2 && (row == 0 || row == h - 1) {
+                // The first or last row: the row beyond it goes on
+                // straight from the two rows inside, column by column; the
+                // columns beyond the grid's sides are the cell's own (as
+                // gdaldem has them).
+                let left = if col == 0 { col } else { col - 1 }
+                let right = if col == w - 1 { col } else { col + 1 }
+                let here = row * w
+                let inner = if row == 0 { (row + 1) * w } else { (row - 1) * w }
+                let o1 = rasBeyond(z[here + left], z[inner + left])
+                let o2 = rasBeyond(z[here + col], z[inner + col])
+                let o3 = rasBeyond(z[here + right], z[inner + right])
+                d = z[here + left]
+                f = z[here + right]
+                if row == 0 {
+                    a = o1
+                    b = o2
+                    c = o3
+                    g = z[inner + left]
+                    k = z[inner + col]
+                    m = z[inner + right]
+                } else {
+                    a = z[inner + left]
+                    b = z[inner + col]
+                    c = z[inner + right]
+                    g = o1
+                    k = o2
+                    m = o3
+                }
+            } else if w >= 2 && h >= 2 {
+                // The first or last column: the column beyond it goes on
+                // straight from the two inside, row by row.
+                let up = i - w
+                let down = i + w
+                if col == 0 {
+                    a = rasBeyond(z[up], z[up + 1])
+                    d = rasBeyond(z[i], z[i + 1])
+                    g = rasBeyond(z[down], z[down + 1])
+                    b = z[up]
+                    c = z[up + 1]
+                    f = z[i + 1]
+                    k = z[down]
+                    m = z[down + 1]
+                } else {
+                    c = rasBeyond(z[up], z[up - 1])
+                    f = rasBeyond(z[i], z[i - 1])
+                    m = rasBeyond(z[down], z[down - 1])
+                    a = z[up - 1]
+                    b = z[up]
+                    d = z[i - 1]
+                    g = z[down - 1]
+                    k = z[down]
+                }
+            } else {
+                a = rasCell(z, w, h, col - 1, row - 1)
+                b = rasCell(z, w, h, col, row - 1)
+                c = rasCell(z, w, h, col + 1, row - 1)
+                d = rasCell(z, w, h, col - 1, row)
+                f = rasCell(z, w, h, col + 1, row)
+                g = rasCell(z, w, h, col - 1, row + 1)
+                k = rasCell(z, w, h, col, row + 1)
+                m = rasCell(z, w, h, col + 1, row + 1)
+            }
+            if !whole {
+                // Neighbours without a value (in holes, or made up from
+                // cells without one) are taken to be as high as the cell.
+                if a.isNaN { a = e }
+                if b.isNaN { b = e }
+                if c.isNaN { c = e }
+                if d.isNaN { d = e }
+                if f.isNaN { f = e }
+                if g.isNaN { g = e }
+                if k.isNaN { k = e }
+                if m.isNaN { m = e }
+            }
+            // How much the land rises towards the east and towards the south.
+            let east = ((c + 2.0 * f + m) - (a + 2.0 * d + g)) / dx
+            let south = ((g + 2.0 * k + m) - (a + 2.0 * b + c)) / dy
+            if what == 0 {
+                let p = east * exaggeration
+                let q = south * exaggeration
+                let light = 255.0 * (cosZenith + sinZenith * (q * sunY - p * sunX)) / sqrt(1.0 + p * p + q * q)
+                out.append(if light < 0.0 { 0.0 } else { light })
+            } else if what == 1 {
+                out.append(atan(sqrt(east * east + south * south)) / rad)
+            } else if east == 0.0 && south == 0.0 {
+                out.append(-1.0)
+            } else {
+                let angle = atan2(south, -east) / rad
+                out.append(if angle > 90.0 { 450.0 - angle } else { 90.0 - angle })
+            }
+        }
+    }
+    out
+}
+
+// A raster layer of one band worked out from another layer's raster.
+fn rasDerived(_ layer: Layer, _ values: [Float], _ what: String, _ style: RasterStyle) -> Layer {
+    let r = layer.raster
+    var out = Layer(name: if layer.name.isEmpty { what } else { "{layer.name} {what}" }, kind: .raster, crs: layer.crs)
+    out.raster = rasOneBand(values, width: r.width, height: r.height, box: r.box)
+    out.rasterStyle = style
+    out
+}
+
+/// Shaded relief of a layer of elevations (band `band`): a new raster
+/// layer of how bright each cell is, from 0 (dark) to 255 (lit), with the
+/// sun at `azimuth` degrees (clockwise from north) and `altitude` degrees
+/// above the horizon, the land drawn `exaggeration` times as tall as it
+/// is. The cells' size is worked out in metres, also for a raster in
+/// degrees; elevations are taken to be in metres. At the edges of the grid
+/// and of holes the missing neighbours are made up by going on straight
+/// (as gdaldem's `-compute_edges`).
+public fn hillshade(_ layer: Layer, azimuth: Float = 315.0, altitude: Float = 45.0, exaggeration: Float = 1.0, band: Int = 0) -> Layer {
+    let v = rasTerrain(layer.raster, crs: layer.crs, band: band, what: 0, azimuth: azimuth, altitude: altitude, exaggeration: exaggeration)
+    rasDerived(layer, v, "hillshade", RasterStyle(look: .gray, low: 0.0, high: 255.0))
+}
+
+/// How steep each cell of a layer of elevations is: a new raster layer in
+/// degrees (0: flat).
+public fn slope(_ layer: Layer, band: Int = 0) -> Layer {
+    let v = rasTerrain(layer.raster, crs: layer.crs, band: band, what: 1, azimuth: 0.0, altitude: 0.0, exaggeration: 1.0)
+    rasDerived(layer, v, "slope", RasterStyle(look: .ramp, ramp: "Viridis", low: 0.0, high: 45.0))
+}
+
+/// Which way each cell of a layer of elevations faces: a new raster layer
+/// of the direction downhill in degrees clockwise from north (0: north,
+/// 90: east), -1 for a flat cell.
+public fn aspect(_ layer: Layer, band: Int = 0) -> Layer {
+    let v = rasTerrain(layer.raster, crs: layer.crs, band: band, what: 2, azimuth: 0.0, altitude: 0.0, exaggeration: 1.0)
+    rasDerived(layer, v, "aspect", RasterStyle(look: .gray, low: 0.0, high: 360.0))
+}
