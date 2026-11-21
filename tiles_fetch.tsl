@@ -1,0 +1,284 @@
+// cartography: getting basemap tiles. Where downloaded tiles are kept (a
+// folder for each source), which of the tiles a map shows are still to be
+// downloaded, and downloading them politely: a few at a time, with a
+// User-Agent that names the library, never the same tile twice at once.
+//
+// A Map is a value, so it can't note by itself which tiles are on their
+// way. The caller keeps that in its `Map.loading`, like this (in a view
+// whose `state map: Map` and `state redraw: Int` draw a Canvas):
+//
+//     fn mapMoved() {
+//         let started = fetchTiles(map, arrived: { path, ok in
+//             map.loading.remove(path)
+//             redraw += 1                    // draw the tile that came
+//         }) { paths in
+//             if warpTileLayers(map) {       // only maps not in Web Mercator
+//                 redraw += 1
+//             }
+//         }
+//         for path in started {
+//             map.loading.insert(path)
+//         }
+//     }
+//
+// Call it after every change of view (and once the map is first shown).
+// `tilesToFetch` and `fetchTile` are the two halves of `fetchTiles`, for
+// callers that want to download in their own way.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+/// One tile to download: its address, the file it goes to, the place of
+/// its layer in `Map.layers`, and the tile.
+public struct TileFetch {
+    url: String = ""
+    path: String = ""
+    layer: Int = 0
+    tile: Tile = Tile()
+}
+
+/// The User-Agent tile requests send unless they're given another, as
+/// tile servers ask (OpenStreetMap's refuse requests without one). An app
+/// can pass its own name to `fetchTiles(userAgent:)`.
+public fn tileUserAgent() -> String {
+    "cartography/0.1 (Tessel library)"
+}
+
+// How many tile downloads may be under way at once, from every
+// `fetchTiles` together, and how many are now.
+let tileDownloadLimit = 6
+let tileDownloading = Shared(0)
+
+/// The folder downloaded tiles are kept in: `m.tileFolder`, or a folder
+/// "cartography-tiles" in the temporary folder.
+public fn tileCacheFolder(_ m: Map) -> String {
+    if m.tileFolder.isEmpty {
+        return joinPath(tempFolder(), "cartography-tiles")
+    }
+    m.tileFolder
+}
+
+/// The folder of a tile layer's tiles in the cache: one for each address,
+/// named after it (and a fingerprint of it, so two addresses never share).
+public fn tileFolderFor(_ m: Map, _ layer: Layer) -> String {
+    joinPath(tileCacheFolder(m), tileSourceKey(layer.urlTemplate))
+}
+
+/// A short name that's safe as a folder for a tile address: its letters
+/// and digits (at most 40 of them, the "https" left out) and 12 hex digits
+/// of its SHA-256.
+public fn tileSourceKey(_ url: String) -> String {
+    var t = url
+    for prefix in ["https://", "http://", "file://"] {
+        if t.hasPrefix(prefix) {
+            t = t.substring(from: prefix.count, to: t.count)
+        }
+    }
+    var out = ""
+    var last = ""
+    for ch in t.characters {
+        if out.count >= 40 {
+            break
+        }
+        let keep = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".contains(ch)
+        let c = if keep { ch } else { "_" }
+        if c == "_" && last == "_" {
+            continue
+        }
+        out += c
+        last = c
+    }
+    let digest = Data(text: url).hash().hex
+    out + "-" + digest.substring(from: 0, to: 12)
+}
+
+/// The file a tile of a layer is kept in once downloaded.
+public fn tilePath(_ m: Map, _ layer: Layer, _ t: Tile) -> String {
+    joinPath(joinPath(joinPath(tileFolderFor(m, layer), "{t.z}"), "{t.x}"), "{t.y}.png")
+}
+
+// The file that notes a tile couldn't be had (the server said no, or sent
+// something that isn't a picture), so it isn't asked for again soon.
+private fn tileFailedMark(_ path: String) -> String {
+    path + ".failed"
+}
+
+/// Did asking for this tile fail less than `seconds` ago?
+public fn tileFailedRecently(_ path: String, seconds: Float = 600.0) -> Bool {
+    if let t = modifiedTime(tileFailedMark(path)) {
+        return now() - t < seconds
+    }
+    false
+}
+
+/// The tiles the visible tile layers of a map show (see `tilesFor`) that
+/// aren't on disk yet, nearest the middle of the map first: not those in
+/// `m.loading`, nor those that failed in the last ten minutes. Tiles
+/// older than `maxAge` seconds (a week) are asked for again (the old one
+/// is drawn until the new one is in). At most `limit` of them.
+public fn tilesToFetch(_ m: Map, limit: Int = 64, maxAge: Float = 604800.0) -> [TileFetch] {
+    var out: [TileFetch] = []
+    var dist: [Float] = []
+    var seen: Set<String> = []
+    let denominator = m.scaleDenominator()
+    for i in 0..m.layers.count {
+        let layer = m.layers[i]
+        if layer.kind != .tiles || !layer.visible || layer.urlTemplate.isEmpty || !layer.showsAt(denominator) {
+            continue
+        }
+        let tiles = tilesFor(m, layer: layer)
+        if tiles.isEmpty {
+            continue
+        }
+        // The middle of the tiles, to fetch from there outwards.
+        var cx = 0.0
+        var cy = 0.0
+        for t in tiles {
+            cx += Float(t.column)
+            cy += Float(t.y)
+        }
+        cx = cx / Float(tiles.count)
+        cy = cy / Float(tiles.count)
+        for t in tiles {
+            let path = tilePath(m, layer, t)
+            if seen.contains(path) || m.loading.contains(path) {
+                continue
+            }
+            seen.insert(path)
+            if let when = modifiedTime(path) {
+                if now() - when < maxAge {
+                    continue
+                }
+            } else if tileFailedRecently(path) {
+                continue
+            }
+            out.append(TileFetch(url: tileUrl(layer.urlTemplate, t), path: path, layer: i, tile: t))
+            let dx = Float(t.column) - cx
+            let dy = Float(t.y) - cy
+            dist.append(Float(i) * 100000.0 + dx * dx + dy * dy)
+        }
+    }
+    // Nearest the middle first, layer by layer.
+    var order: [Int] = []
+    for k in 0..out.count {
+        order.append(k)
+    }
+    order = order.sorted(by: { a, b in dist[a] < dist[b] })
+    var sorted: [TileFetch] = []
+    for k in order {
+        if sorted.count >= limit {
+            break
+        }
+        sorted.append(out[k])
+    }
+    sorted
+}
+
+/// Downloads one tile into its file (making its folders), sending a
+/// User-Agent (`tileUserAgent()` unless given another). `done` gets
+/// whether a picture arrived; when none did, the tile is noted as failed
+/// (see `tileFailedRecently`).
+public fn fetchTile(_ f: TileFetch, userAgent: String = "", done: fn(Bool)) {
+    let agent = if userAgent.isEmpty { tileUserAgent() } else { userAgent }
+    let _made = createFolder(f.path.folder)
+    let headers = ["User-Agent": agent]
+    download(url: f.url, to: f.path, headers: headers) { ok in
+        var good = ok
+        if good && imageSize(f.path) == nil {
+            // (A page saying why not, say, rather than a picture.)
+            let _gone = deleteFile(f.path)
+            good = false
+        }
+        if good {
+            let _cleared = deleteFile(tileFailedMark(f.path))
+        } else {
+            let _noted = writeText(path: tileFailedMark(f.path), text: f.url)
+        }
+        done(good)
+    }
+}
+
+/// Downloads the tiles a map shows that aren't on disk yet (see
+/// `tilesToFetch`): `parallel` at a time (and never more than six from
+/// every call together). Returns the files it's getting at once, for the
+/// caller to put in its `Map.loading`. `arrived` gets each file as its
+/// download ends, and whether it worked; `done` gets them all at the end
+/// (at once, with none, when there's nothing to get). See the top of this
+/// file for how a view uses it.
+public fn fetchTiles(_ m: Map, parallel: Int = 4, limit: Int = 64, userAgent: String = "", arrived: fn(String, Bool)? = nil, done: fn([String])) -> [String] {
+    let wanted = tilesToFetch(m, limit: limit)
+    var paths: [String] = []
+    for f in wanted {
+        paths.append(f.path)
+    }
+    if wanted.isEmpty {
+        done([])
+        return paths
+    }
+    let most = max(parallel, 1)
+    var next = 0
+    var running = 0
+    var finished = 0
+    var pump: fn() = {}
+    pump = {
+        while next < wanted.count && running < most {
+            // A free place among every call's downloads?
+            let mine = tileDownloading.update { n in
+                if n < tileDownloadLimit { n + 1 } else { n + 1000 }
+            }
+            if mine >= 1000 {
+                let _undo = tileDownloading.update { n in n - 1000 }
+                if running == 0 {
+                    after(seconds: 0.05) { pump() }
+                }
+                return
+            }
+            let f = wanted[next]
+            next += 1
+            running += 1
+            fetchTile(f, userAgent: userAgent) { ok in
+                let _freed = tileDownloading.update { n in max(n - 1, 0) }
+                running -= 1
+                finished += 1
+                if let tell = arrived {
+                    tell(f.path, ok)
+                }
+                if finished == wanted.count {
+                    done(paths)
+                } else {
+                    pump()
+                }
+            }
+        }
+    }
+    pump()
+    paths
+}
+
+/// Deletes downloaded tiles: those of the source whose address is
+/// `source`, or every source's when it's "". Returns how many files went.
+public fn clearTileCache(_ m: Map, source: String = "") -> Int {
+    let root = tileCacheFolder(m)
+    if source.isEmpty {
+        return tileDeleteTree(root)
+    }
+    tileDeleteTree(joinPath(root, tileSourceKey(source)))
+}
+
+// Deletes the files in a folder and the folders in it (the folders
+// themselves stay, emptied). Returns how many files went.
+private fn tileDeleteTree(_ folder: String) -> Int {
+    if !isFolder(folder) {
+        return 0
+    }
+    var count = 0
+    for name in listFolder(folder) ?? [] {
+        let path = joinPath(folder, name)
+        if isFolder(path) {
+            count += tileDeleteTree(path)
+        } else if deleteFile(path) {
+            count += 1
+        }
+    }
+    count
+}

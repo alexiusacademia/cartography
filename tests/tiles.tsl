@@ -1,0 +1,616 @@
+// cartography tests: basemap tiles. Tile numbers, boxes and addresses
+// against mercantile (tests/tiles_oracle.tsl), sources, WMS addresses, the
+// tiles a map shows, fetching from a file:// tile server made on the spot,
+// drawing with tiles further out standing in, and warping tiles whose
+// pixels say where they are into UTM and longitude/latitude maps.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import ".." as cartography
+import geodesy
+
+// ----- helpers -----
+
+// A folder of its own for a test, emptied.
+fn tileTFolder(_ name: String) -> String {
+    let folder = joinPath(joinPath(tempFolder(), "cartography-tile-tests"), name + "-{Int(now() * 1000.0) % 100000000}-{random(0..1000000)}")
+    let _made = createFolder(folder)
+    folder
+}
+
+fn tileTPixel(_ r: Int, _ g: Int, _ b: Int) -> Int {
+    r * 16777216 + g * 65536 + b * 256 + 255
+}
+
+// A tile of one color, `side` pixels across.
+fn tileTSolid(_ path: String, _ color: Int, side: Int = 256) -> Bool {
+    let _made = createFolder(path.folder)
+    var px: [Int] = []
+    for _ in 0..(side * side) {
+        px.append(color)
+    }
+    writeImage(path: path, width: side, height: side, pixels: px)
+}
+
+// A map of `w` × `h` points in `crs`, its middle at a place, showing
+// `metersPerPoint` meters (in Web Mercator) or units in a point.
+fn tileTMap(_ crs: geodesy.Crs, lon: Float, lat: Float, unitsPerPoint: Float, w: Float = 400.0, h: Float = 300.0) -> cartography.Map {
+    var m = cartography.Map()
+    m.crs = crs
+    m.vp.smooth = false
+    m.vp.resize(w, h)
+    let (x, y) = crs.fromWGS84(lon, lat)
+    m.vp.show(x, y, 1.0 / unitsPerPoint, 0.0)
+    m
+}
+
+// The longitude and latitude of the middle of a tile pixel.
+fn tileTPixelLonLat(_ gx: Int, _ gy: Int, _ z: Int, _ side: Int) -> (Float, Float) {
+    let world = Float(side) * pow(2.0, Float(z))
+    let lon = (Float(gx) + 0.5) / world * 360.0 - 180.0
+    let k = pi * (1.0 - 2.0 * (Float(gy) + 0.5) / world)
+    let lat = atan((exp(k) - exp(-k)) / 2.0) * 180.0 / pi
+    (lon, lat)
+}
+
+// A place as a color: 12 bits of where it is between lon0 and lon1, 12 of
+// where between lat0 and lat1. With `eight`, 8 bits of each, in red and
+// green, which blending pixels keeps right.
+fn tileTEncode(_ lon: Float, _ lat: Float, _ r: [Float], eight: Bool = false) -> Int {
+    if eight {
+        let a = Int(round((lon - r[0]) / (r[1] - r[0]) * 255.0)).clamped(min: 0, max: 255)
+        let b = Int(round((lat - r[2]) / (r[3] - r[2]) * 255.0)).clamped(min: 0, max: 255)
+        return tileTPixel(a, b, 128)
+    }
+    let a = Int(round((lon - r[0]) / (r[1] - r[0]) * 4095.0)).clamped(min: 0, max: 4095)
+    let b = Int(round((lat - r[2]) / (r[3] - r[2]) * 4095.0)).clamped(min: 0, max: 4095)
+    let red = a >> 4
+    let green = ((a & 15) << 4) | (b >> 8)
+    let blue = b & 255
+    tileTPixel(red, green, blue)
+}
+
+fn tileTDecode(_ p: Int, _ r: [Float], eight: Bool = false) -> (Float, Float) {
+    if eight {
+        let a = Float((p >> 24) & 255)
+        let b = Float((p >> 16) & 255)
+        return (r[0] + a / 255.0 * (r[1] - r[0]), r[2] + b / 255.0 * (r[3] - r[2]))
+    }
+    let red = (p >> 24) & 255
+    let green = (p >> 16) & 255
+    let blue = (p >> 8) & 255
+    let a = (red << 4) | (green >> 4)
+    let b = ((green & 15) << 8) | blue
+    (r[0] + Float(a) / 4095.0 * (r[1] - r[0]), r[2] + Float(b) / 4095.0 * (r[3] - r[2]))
+}
+
+// Writes into the map's cache each tile `tilesFor` asks of the map's first
+// layer, its pixels saying where they are (see tileTEncode). Returns the
+// range encoded: lon0, lon1, lat0, lat1.
+fn tileTWriteSelfTiles(_ m: cartography.Map, side: Int = 256, eight: Bool = false) -> [Float] {
+    let layer = m.layers[0]
+    let tiles = cartography.tilesFor(m, layer: layer)
+    var lon0 = 1000.0
+    var lon1 = -1000.0
+    var lat0 = 1000.0
+    var lat1 = -1000.0
+    for t in tiles {
+        let (a, b) = tileTPixelLonLat(t.x * side, t.y * side, t.z, side)
+        let (c, d) = tileTPixelLonLat(t.x * side + side, t.y * side + side, t.z, side)
+        lon0 = min(lon0, a, c)
+        lon1 = max(lon1, a, c)
+        lat0 = min(lat0, b, d)
+        lat1 = max(lat1, b, d)
+    }
+    let range = [lon0 - 0.01, lon1 + 0.01, lat0 - 0.01, lat1 + 0.01]
+    for t in tiles {
+        var px: [Int] = []
+        for j in 0..side {
+            for i in 0..side {
+                let (lon, lat) = tileTPixelLonLat(t.x * side + i, t.y * side + j, t.z, side)
+                px.append(tileTEncode(lon, lat, range, eight: eight))
+            }
+        }
+        let path = cartography.tilePath(m, layer, t)
+        let _made = createFolder(path.folder)
+        let _w = writeImage(path: path, width: side, height: side, pixels: px)
+    }
+    range
+}
+
+// Checks a warped picture against geodesy: at a grid of its pixels, the
+// place the pixel's color says against where the pixel is. Returns the
+// largest error in degrees and how many pixels were checked.
+fn tileTCheckWarp(_ m: cartography.Map, _ r: cartography.Raster, _ range: [Float], eight: Bool = false) -> (Float, Int) {
+    var worst = 0.0
+    var checked = 0
+    let px = r.pixelBox.width() / Float(r.pixelWidth)
+    let py = r.pixelBox.height() / Float(r.pixelHeight)
+    var v = 3
+    while v < r.pixelHeight {
+        var u = 5
+        while u < r.pixelWidth {
+            let p = r.pixels[v * r.pixelWidth + u]
+            if p != 0 {
+                let x = r.pixelBox.minX + (Float(u) + 0.5) * px
+                let y = r.pixelBox.maxY - (Float(v) + 0.5) * py
+                let (lon, lat) = m.crs.toWGS84(x, y)
+                let (glon, glat) = tileTDecode(p, range, eight: eight)
+                worst = max(worst, abs(glon - lon), abs(glat - lat))
+                checked += 1
+            }
+            u += 37
+        }
+        v += 29
+    }
+    (worst, checked)
+}
+
+// ----- tile maths against mercantile -----
+
+test "tile numbers of places match mercantile" {
+    for row in tileOracleRows {
+        let t = cartography.tileAt(lon: row[0], lat: row[1], zoom: Int(row[2]))
+        expect(t.x == Int(row[3]), "x of {row[0]}, {row[1]} at {row[2]}")
+        expect(t.y == Int(row[4]), "y of {row[0]}, {row[1]} at {row[2]}")
+        expect(t.tmsY() == Int(row[9]))
+    }
+}
+
+test "tile boxes match mercantile" {
+    for row in tileOracleRows {
+        let t = cartography.Tile(z: Int(row[2]), x: Int(row[3]), y: Int(row[4]), column: Int(row[3]))
+        let b = t.box()
+        expect(abs(b.minX - row[5]) < 0.000001)
+        expect(abs(b.minY - row[6]) < 0.000001)
+        expect(abs(b.maxX - row[7]) < 0.000001)
+        expect(abs(b.maxY - row[8]) < 0.000001)
+    }
+}
+
+test "quadkeys match mercantile" {
+    for (i, row) in tileOracleRows.enumerated() {
+        let t = cartography.Tile(z: Int(row[2]), x: Int(row[3]), y: Int(row[4]), column: Int(row[3]))
+        expect(t.quadkey() == tileOracleQuadkeys[i])
+    }
+}
+
+test "tile addresses match the oracle's" {
+    for (template, z, x, y, url) in tileOracleUrls {
+        let got = cartography.tileUrl(template, cartography.Tile(z: z, x: x, y: y, column: x))
+        if !template.contains("bbox") {
+            expect(got == url)
+            continue
+        }
+        // Numbers may be written differently: compare their values.
+        let a = got.split("BBOX=")[1].split("&")[0].split(",")
+        let b = url.split("BBOX=")[1].split("&")[0].split(",")
+        expect(a.count == 4 && b.count == 4)
+        for k in 0..4 {
+            let va = Float(a[k]) ?? 0.0
+            let vb = Float(b[k]) ?? 1.0
+            expect(abs(va - vb) < 0.001, "{a[k]} vs {b[k]}")
+        }
+    }
+}
+
+test "a tile's parent, children and ancestors" {
+    let t = cartography.Tile(z: 5, x: 17, y: 9, column: 17)
+    let p = t.parent()
+    expect(p.z == 4 && p.x == 8 && p.y == 4)
+    let kids = p.children()
+    expect(kids.count == 4)
+    expect(kids.any(where: { k in k.x == 17 && k.y == 9 && k.z == 5 }))
+    let a = t.ancestor(3)
+    expect(a.z == 2 && a.x == 2 && a.y == 1)
+    // Columns left of the world stay left of it.
+    let w = cartography.Tile(z: 2, x: 3, y: 1, column: -1)
+    expect(w.parent().column == -1 && w.parent().x == 1)
+    expect(abs(w.box().maxX - (-cartography.tileWorldHalf())) < 0.000001)
+    expect(t.key() == "5/17/9")
+}
+
+test "the zoom for a scale" {
+    let top = 156543.03392804097
+    expect(cartography.tileZoomFor(metersPerPoint: top) == 0)
+    expect(cartography.tileZoomFor(metersPerPoint: top / 1024.0) == 10)
+    // Tile pixels shrunk down to 2^-0.6 of a point: still that zoom.
+    expect(cartography.tileZoomFor(metersPerPoint: top / 1024.0 * 1.25) == 10)
+    expect(cartography.tileZoomFor(metersPerPoint: top / 1024.0 * 1.6) == 9)
+    expect(cartography.tileZoomFor(metersPerPoint: top / 1024.0, minZoom: 0, maxZoom: 8) == 8)
+    expect(cartography.tileZoomFor(metersPerPoint: top * 4.0, minZoom: 2) == 2)
+    expect(cartography.tileZoomFor(metersPerPoint: 0.0, minZoom: 3) == 3)
+}
+
+test "tiles in a box, across the 180° meridian, and the limit" {
+    let h = cartography.tileWorldHalf()
+    let world = cartography.boxOf(minX: -h, minY: -h, maxX: h, maxY: h)
+    expect(cartography.tilesIn(world, zoom: 0).count == 1)
+    expect(cartography.tilesIn(world, zoom: 2).count == 16)
+    expect(cartography.tilesIn(world, zoom: 2, limit: 15).isEmpty)
+    // A box from 170°E to 170°W (x past the world's right edge).
+    let (x0, _) = cartography.webMercator().fromWGS84(170.0, 0.0)
+    let span = cartography.boxOf(minX: x0, minY: -100000.0, maxX: x0 + 2.0 * (h - x0), maxY: 100000.0)
+    let tiles = cartography.tilesIn(span, zoom: 3)
+    expect(tiles.count == 4)
+    let xs = tiles.map { t in t.x }
+    expect(xs.contains(7) && xs.contains(0))
+    expect(tiles.map { t in t.column }.contains(8))
+    // A box that only touches a tile's edge doesn't take it.
+    let one = cartography.Tile(z: 4, x: 5, y: 6, column: 5).box()
+    expect(cartography.tilesIn(one, zoom: 4).count == 1)
+}
+
+// ----- sources and layers -----
+
+test "keyless sources, each with its credit" {
+    let sources = cartography.tileSources()
+    expect(sources.count >= 8)
+    for s in sources {
+        expect(!s.attribution.isEmpty, s.name)
+        expect(s.url.hasPrefix("https://"), s.name)
+        expect(s.url.contains("\{z}") && s.url.contains("\{x}") && s.url.contains("\{y}"), s.name)
+        expect(!s.url.lowercase().contains("key") && !s.url.contains("token"), s.name)
+        expect(s.maxZoom > s.minZoom)
+        if s.url.contains("openstreetmap") || s.url.contains("cartocdn") || s.url.contains("opentopomap") {
+            expect(s.attribution.contains("© OpenStreetMap contributors"), s.name)
+        }
+    }
+    let osm = cartography.openStreetMap()
+    expect(osm.kind == cartography.LayerKind.tiles)
+    expect(osm.urlTemplate == "https://tile.openstreetmap.org/\{z}/\{x}/\{y}.png")
+    expect(osm.attribution == "© OpenStreetMap contributors")
+    expect(osm.maxZoom == 19)
+    expect(cartography.tileSource(named: "opentopomap")?.maxZoom == 17)
+    let none = cartography.tileSource(named: "nothing")?.name == nil
+    expect(none)
+    let x = cartography.xyzLayer(url: "https://example.com/\{z}/\{x}/\{y}.png", name: "Mine", attribution: "© Me", maxZoom: 12)
+    expect(x.name == "Mine" && x.maxZoom == 12 && x.attribution == "© Me" && x.kind == cartography.LayerKind.tiles)
+    expect(cartography.tileUserAgent().contains("cartography") && cartography.tileUserAgent().contains("Tessel library"))
+}
+
+test "WMS addresses" {
+    let t = cartography.wmsTemplate(service: "https://example.com/wms?map=roads&request=GetCapabilities&SERVICE=WMS", layers: "roads,rivers")
+    expect(t == "https://example.com/wms?map=roads&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=roads%2Crivers&STYLES=&SRS=EPSG:3857&BBOX=\{bbox}&WIDTH=256&HEIGHT=256&FORMAT=image%2Fpng&TRANSPARENT=TRUE")
+    let v13 = cartography.wmsTemplate(service: "https://example.com/ows", layers: "a", version: "1.3.0", transparent: false)
+    expect(v13.contains("?SERVICE=WMS&VERSION=1.3.0&") && v13.contains("&CRS=EPSG:3857&") && v13.hasSuffix("TRANSPARENT=FALSE"))
+    let layer = cartography.wmsLayer(service: "https://example.com/wms", layers: "roads", attribution: "© Roads")
+    expect(layer.name == "roads" && layer.kind == cartography.LayerKind.tiles && layer.attribution == "© Roads")
+    let url = cartography.tileUrl(layer.urlTemplate, cartography.Tile(z: 1, x: 1, y: 0, column: 1))
+    expect(url.contains("BBOX=0,0,20037508.343,20037508.343&"))
+    let caps = "<WMS_Capabilities><Capability><Layer><Title>All</Title><Layer queryable=\"1\"><Name>roads</Name><Title>Roads</Title></Layer><Layer><Name>rivers</Name><Title><![CDATA[Rivers & lakes]]></Title></Layer></Layer></Capability></WMS_Capabilities>"
+    let names = cartography.wmsLayerNames(caps)
+    expect(names.count == 2)
+    expect(names[0].0 == "roads" && names[0].1 == "Roads")
+    expect(names[1].0 == "rivers" && names[1].1 == "Rivers & lakes")
+}
+
+test "cache folders are safe and one for each address" {
+    let a = cartography.tileSourceKey("https://tile.openstreetmap.org/\{z}/\{x}/\{y}.png")
+    let b = cartography.tileSourceKey("https://tile.openstreetmap.org/\{z}/\{x}/\{y}.jpg")
+    expect(a != b)
+    expect(a.hasPrefix("tile_openstreetmap_org_"))
+    let long = cartography.tileSourceKey(cartography.wmsTemplate(service: "https://example.com/geoserver/wms", layers: "a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p"))
+    expect(long.count <= 53)
+    for ch in long.characters {
+        expect("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-".contains(ch))
+    }
+    var m = cartography.Map()
+    expect(cartography.tileCacheFolder(m) == joinPath(tempFolder(), "cartography-tiles"))
+    m.tileFolder = "/somewhere/tiles"
+    let osm = cartography.openStreetMap()
+    expect(cartography.tilePath(m, osm, cartography.Tile(z: 3, x: 2, y: 1, column: 2)) == joinPath(joinPath(joinPath(joinPath("/somewhere/tiles", a), "3"), "2"), "1.png"))
+}
+
+// ----- the tiles a map shows -----
+
+test "a Web Mercator map's zoom and tiles" {
+    // Manila at about zoom 12: 156543 / 4096 = 38.2 meters a point.
+    var m = tileTMap(cartography.webMercator(), lon: 121.0, lat: 14.6, unitsPerPoint: 38.2, w: 512.0, h: 512.0)
+    m.add(cartography.openStreetMap())
+    expect(cartography.tileZoom(m, m.layers[0]) == 12)
+    let tiles = cartography.tilesFor(m, layer: m.layers[0])
+    // 512 points of 38.2 m: two tiles and a bit each way.
+    expect(tiles.count >= 4 && tiles.count <= 9)
+    var covered = cartography.Box()
+    for t in tiles {
+        expect(t.z == 12)
+        covered.include(t.box())
+    }
+    let seen = m.visible()
+    expect(covered.minX <= seen.minX && covered.maxX >= seen.maxX && covered.minY <= seen.minY && covered.maxY >= seen.maxY)
+    expect(tiles.any(where: { t in t.x == cartography.tileAt(lon: 121.0, lat: 14.6, zoom: 12).x && t.y == cartography.tileAt(lon: 121.0, lat: 14.6, zoom: 12).y }))
+    // Past the layer's last zoom, its last zoom's tiles grow.
+    m.layers[0].maxZoom = 10
+    expect(cartography.tileZoom(m, m.layers[0]) == 10)
+    // Too many tiles: zooms further out.
+    let few = cartography.tilesFor(m, layer: m.layers[0], limit: 1)
+    expect(few.count == 1 && few[0].z < 10)
+}
+
+test "a UTM map's tiles cover what it shows" {
+    let utm = geodesy.utm(zone: 51)
+    // About 40 m a point in UTM: a Web Mercator zoom of about 12 there.
+    var m = tileTMap(utm, lon: 121.0, lat: 14.6, unitsPerPoint: 40.0)
+    m.add(cartography.openStreetMap())
+    let z = cartography.tileZoom(m, m.layers[0])
+    expect(z == 12, "zoom {z}")
+    let tiles = cartography.tilesFor(m, layer: m.layers[0])
+    expect(!tiles.isEmpty)
+    let seen = m.visible()
+    for (x, y) in [(seen.minX, seen.minY), (seen.maxX, seen.maxY), (seen.minX, seen.maxY), (seen.maxX, seen.minY)] {
+        let (lon, lat) = utm.toWGS84(x, y)
+        let t = cartography.tileAt(lon: lon, lat: lat, zoom: z)
+        expect(tiles.any(where: { k in k.x == t.x && k.y == t.y }), "corner {lon}, {lat}")
+    }
+}
+
+test "a longitude/latitude map across the 180° meridian" {
+    var m = tileTMap(cartography.lonLat(), lon: 179.5, lat: -17.0, unitsPerPoint: 0.005)
+    m.add(cartography.openStreetMap())
+    let tiles = cartography.tilesFor(m, layer: m.layers[0])
+    expect(!tiles.isEmpty)
+    let n = 1 << tiles[0].z
+    expect(tiles.any(where: { t in t.x == n - 1 }))
+    expect(tiles.any(where: { t in t.x == 0 }))
+}
+
+// ----- fetching -----
+
+test "fetching tiles from a file:// server, end to end" {
+    let root = tileTFolder("fetch")
+    let server = joinPath(root, "server")
+    // A server with every tile of zooms 0 to 2 but one.
+    for z in 0..3 {
+        let n = 1 << z
+        for x in 0..n {
+            for y in 0..n {
+                if !(z == 2 && x == 1 && y == 1) {
+                    expect(tileTSolid(joinPath(server, "{z}/{x}/{y}.png"), tileTPixel(40 * z, 10 * x, 10 * y), side: 32))
+                }
+            }
+        }
+    }
+    let h = cartography.tileWorldHalf()
+    var m = cartography.Map()
+    m.tileFolder = joinPath(root, "cache")
+    m.vp.smooth = false
+    m.vp.resize(1024.0, 1024.0)
+    m.vp.show(0.0, 0.0, 1024.0 / (2.0 * h), 0.0)
+    m.add(cartography.xyzLayer(url: "file://" + server + "/\{z}/\{x}/\{y}.png", name: "Synthetic", attribution: "© Test", maxZoom: 2))
+    let layer = m.layers[0]
+    expect(cartography.tileZoom(m, layer) == 2)
+    let wanted = cartography.tilesToFetch(m)
+    expect(wanted.count == 16)
+    // Nearest the middle first.
+    let firstFour = Set(wanted.prefix(4).map { f in f.tile.key() })
+    expect(firstFour == Set(["2/1/1", "2/2/1", "2/1/2", "2/2/2"]))
+    expect(wanted[0].url.hasPrefix("file://" + server + "/2/"))
+    // What's loading isn't asked for twice.
+    var busy = m
+    busy.loading.insert(wanted[0].path)
+    expect(cartography.tilesToFetch(busy).count == 15)
+    var seenArrived: [String] = []
+    let started = cartography.fetchTiles(m, parallel: 3, arrived: { path, ok in
+        seenArrived.append(path)
+    }) { paths in
+        expect(paths.count == 16)
+        expect(seenArrived.count == 16)
+        let missing = cartography.tilePath(m, layer, cartography.Tile(z: 2, x: 1, y: 1, column: 1))
+        for p in paths {
+            expect(fileExists(p) == (p != missing), p)
+        }
+        expect(cartography.tileFailedRecently(missing))
+        // Everything is in (or failed lately): nothing more to fetch.
+        expect(cartography.tilesToFetch(m).isEmpty)
+        // Clearing the cache: all of it, then fetched again.
+        expect(cartography.clearTileCache(m, source: "https://elsewhere/\{z}/\{x}/\{y}.png") == 0)
+        expect(cartography.clearTileCache(m) == 16)
+        expect(cartography.tilesToFetch(m).count == 16)
+    }
+    expect(started.count == 16)
+    expect(started == wanted.map { f in f.path })
+}
+
+test "fetchTiles with nothing to fetch says so at once" {
+    var m = cartography.Map()
+    m.vp.smooth = false
+    m.vp.resize(256.0, 256.0)
+    var called = false
+    let started = cartography.fetchTiles(m) { paths in
+        called = paths.isEmpty
+    }
+    expect(started.isEmpty && called)
+}
+
+test "fetchTile sends a page that isn't a picture away" {
+    let root = tileTFolder("notpicture")
+    let page = joinPath(root, "page.png")
+    let _w = writeText(path: page, text: "<html>no tiles here</html>")
+    let f = cartography.TileFetch(url: "file://" + page, path: joinPath(root, "cache/1/0/0.png"), layer: 0, tile: cartography.Tile(z: 1, x: 0, y: 0, column: 0))
+    cartography.fetchTile(f) { ok in
+        expect(!ok)
+        expect(!fileExists(f.path))
+        expect(cartography.tileFailedRecently(f.path))
+    }
+}
+
+// ----- drawing -----
+
+test "drawing tiles, with tiles further out standing in" {
+    let root = tileTFolder("draw")
+    let h = cartography.tileWorldHalf()
+    var m = cartography.Map()
+    m.tileFolder = joinPath(root, "cache")
+    m.background = .rgb(0, 0, 0)
+    m.add(cartography.xyzLayer(url: "file:///nowhere/\{z}/\{x}/\{y}.png", name: "T", maxZoom: 2))
+    let layer = m.layers[0]
+    // Zoom 1: four colors. Zoom 2: only the top left tile, white.
+    let colors = [tileTPixel(255, 0, 0), tileTPixel(0, 255, 0), tileTPixel(0, 0, 255), tileTPixel(255, 255, 0)]
+    for (k, t) in [cartography.Tile(z: 1, x: 0, y: 0), cartography.Tile(z: 1, x: 1, y: 0), cartography.Tile(z: 1, x: 0, y: 1), cartography.Tile(z: 1, x: 1, y: 1)].enumerated() {
+        expect(tileTSolid(cartography.tilePath(m, layer, t), colors[k], side: 64))
+    }
+    expect(tileTSolid(cartography.tilePath(m, layer, cartography.Tile(z: 2, x: 0, y: 0)), tileTPixel(255, 255, 255), side: 64))
+    // The world, 1024 points across: zoom 2.
+    m.vp.smooth = false
+    m.vp.resize(1024.0, 1024.0)
+    m.vp.show(0.0, 0.0, 1024.0 / (2.0 * h), 0.0)
+    expect(cartography.tileZoom(m, layer) == 2)
+    let picture = joinPath(root, "world.png")
+    expect(m.savePicture(picture, width: 1024.0, height: 1024.0, scale: 1.0))
+    if let (w, hh, px) = readImage(picture) {
+        expect(w == 1024 && hh == 1024)
+        let at: fn(Int, Int) -> Int = { x, y in px[y * w + x] }
+        // The zoom-2 tile itself, top left.
+        expect(at(100, 100) == tileTPixel(255, 255, 255))
+        // The rest of the top left quarter: its parent, red.
+        expect(at(400, 100) == colors[0])
+        expect(at(100, 400) == colors[0])
+        expect(at(400, 400) == colors[0])
+        // The other quarters: their parents.
+        expect(at(700, 100) == colors[1])
+        expect(at(300, 700) == colors[2])
+        expect(at(800, 800) == colors[3])
+    } else {
+        fail("no picture")
+    }
+    // Drawing changed nothing.
+    expect(m.loading.isEmpty)
+    // Half see-through over black: half as bright, the same everywhere in a
+    // quarter (no darker overlaps where tiles meet).
+    m.layers[0].opacity = 0.5
+    let half = joinPath(root, "half.png")
+    expect(m.savePicture(half, width: 1024.0, height: 1024.0, scale: 1.0))
+    if let (w, _, px) = readImage(half) {
+        let red: fn(Int, Int) -> Int = { x, y in (px[y * w + x] >> 24) & 255 }
+        expect(abs(red(400, 400) - 128) <= 2, "red {red(400, 400)}")
+        expect(red(256, 400) == red(400, 400) && red(400, 256) == red(400, 400))
+        expect(red(255, 255) == red(400, 400))
+        expect(abs(red(100, 100) - 128) <= 2)
+    } else {
+        fail("no picture")
+    }
+}
+
+// ----- warping -----
+
+test "warped tiles land where geodesy says, in UTM" {
+    let root = tileTFolder("warp-utm")
+    var m = tileTMap(geodesy.utm(zone: 51), lon: 121.0, lat: 14.6, unitsPerPoint: 150.0, w: 480.0, h: 360.0)
+    m.tileFolder = joinPath(root, "cache")
+    m.add(cartography.xyzLayer(url: "file:///nowhere/\{z}/\{x}/\{y}.png", name: "Self", minZoom: 9, maxZoom: 9))
+    let range = tileTWriteSelfTiles(m)
+    let r = cartography.warpTiles(m, m.layers[0])
+    expect(r.pixelWidth == 480 && r.pixelHeight == 360)
+    expect(r.pixels.count == 480 * 360)
+    let seen = m.visible()
+    expect(abs(r.pixelBox.minX - seen.minX) < 1.0 && abs(r.pixelBox.maxY - seen.maxY) < 1.0)
+    let (worst, checked) = tileTCheckWarp(m, r, range)
+    // A tile pixel at zoom 9 is 360 / 2^17 = 0.0027°.
+    expect(checked > 100, "{checked} checked")
+    expect(worst < 0.0027 * 1.2, "worst {worst}°")
+    // Blended: 8 bits of each, so within a 255th of the range too.
+    let range8 = tileTWriteSelfTiles(m, eight: true)
+    let smooth = cartography.warpTiles(m, m.layers[0], smooth: true)
+    let (worstSmooth, checkedSmooth) = tileTCheckWarp(m, smooth, range8, eight: true)
+    let step = max(range8[1] - range8[0], range8[3] - range8[2]) / 255.0
+    expect(checkedSmooth > 100)
+    expect(worstSmooth < 0.0027 + step, "worst smooth {worstSmooth}°")
+}
+
+test "warped tiles land where geodesy says, in longitude and latitude" {
+    let root = tileTFolder("warp-ll")
+    var m = tileTMap(cartography.lonLat(), lon: -3.7, lat: 40.4, unitsPerPoint: 0.002, w: 400.0, h: 400.0)
+    m.tileFolder = joinPath(root, "cache")
+    m.add(cartography.xyzLayer(url: "file:///nowhere/\{z}/\{x}/\{y}.png", name: "Self", minZoom: 8, maxZoom: 8))
+    let range = tileTWriteSelfTiles(m)
+    let r = cartography.warpTiles(m, m.layers[0], density: 0.5)
+    expect(r.pixelWidth == 200 && r.pixelHeight == 200)
+    let (worst, checked) = tileTCheckWarp(m, r, range)
+    expect(checked > 20)
+    expect(worst < 360.0 / 65536.0 * 1.2, "worst {worst}°")
+    // In a Web Mercator map there's nothing to warp.
+    var wm = m
+    wm.setCrs(cartography.webMercator())
+    expect(cartography.warpTiles(wm, wm.layers[0]).pixels.isEmpty)
+}
+
+test "warping takes a tile further out for one not on disk, and warpTileLayers keeps it" {
+    let root = tileTFolder("warp-parent")
+    var m = tileTMap(cartography.lonLat(), lon: 10.0, lat: 10.0, unitsPerPoint: 0.01, w: 200.0, h: 200.0)
+    m.tileFolder = joinPath(root, "cache")
+    m.add(cartography.xyzLayer(url: "file:///nowhere/\{z}/\{x}/\{y}.png", name: "P", minZoom: 6, maxZoom: 6))
+    let layer = m.layers[0]
+    let t = cartography.tileAt(lon: 10.0, lat: 10.0, zoom: 6)
+    // Only zoom 3 is on disk, one color.
+    expect(tileTSolid(cartography.tilePath(m, layer, t.ancestor(3)), tileTPixel(12, 34, 56), side: 64))
+    expect(cartography.warpTileLayers(m))
+    let r = m.layers[0].raster
+    expect(!r.pixels.isEmpty)
+    expect(r.pixels[(r.pixelHeight / 2) * r.pixelWidth + r.pixelWidth / 2] == tileTPixel(12, 34, 56))
+    // Nothing changed since: no change.
+    expect(!cartography.warpTileLayers(m))
+    // In Web Mercator the pictures go.
+    m.setCrs(cartography.webMercator())
+    expect(cartography.warpTileLayers(m))
+    expect(m.layers[0].raster.pixels.isEmpty)
+}
+
+test "warping a canvas-sized view is quick enough" {
+    let root = tileTFolder("warp-speed")
+    var m = tileTMap(geodesy.utm(zone: 33), lon: 15.0, lat: 45.0, unitsPerPoint: 60.0, w: 1200.0, h: 800.0)
+    m.tileFolder = joinPath(root, "cache")
+    m.add(cartography.xyzLayer(url: "file:///nowhere/\{z}/\{x}/\{y}.png", name: "S"))
+    let _range = tileTWriteSelfTiles(m)
+    let t0 = now()
+    let r = cartography.warpTiles(m, m.layers[0])
+    let took = now() - t0
+    print("warped {r.pixelWidth} × {r.pixelHeight} from {cartography.tilesFor(m, layer: m.layers[0]).count} tiles in {took} s")
+    expect(r.pixelWidth == 1200 && r.pixelHeight == 800)
+    expect(took < 3.0, "took {took} s")
+    // Every pixel colored: the tiles cover the view.
+    let clear = r.pixels.count(where: { p in p == 0 })
+    expect(clear == 0, "{clear} clear pixels")
+    let t1 = now()
+    let s = cartography.warpTiles(m, m.layers[0], smooth: true)
+    let tookSmooth = now() - t1
+    print("smooth: {tookSmooth} s")
+    expect(s.pixels.count == r.pixels.count)
+    expect(tookSmooth < 3.0, "took {tookSmooth} s")
+}
+
+test "two fetches at once share the polite limit and both finish" {
+    let root = tileTFolder("two")
+    let server = joinPath(root, "server")
+    for x in 0..8 {
+        for y in 0..8 {
+            expect(tileTSolid(joinPath(server, "3/{x}/{y}.png"), tileTPixel(x * 30, y * 30, 0), side: 16))
+        }
+    }
+    let h = cartography.tileWorldHalf()
+    var a = cartography.Map()
+    a.vp.smooth = false
+    a.vp.resize(2048.0, 2048.0)
+    a.vp.show(0.0, 0.0, 2048.0 / (2.0 * h), 0.0)
+    a.add(cartography.xyzLayer(url: "file://" + server + "/\{z}/\{x}/\{y}.png", minZoom: 3, maxZoom: 3))
+    var b = a
+    a.tileFolder = joinPath(root, "cache-a")
+    b.tileFolder = joinPath(root, "cache-b")
+    var finished = 0
+    let sa = cartography.fetchTiles(a, parallel: 6) { paths in
+        expect(paths.count == 64)
+        expect(paths.all(where: { p in fileExists(p) }))
+        finished += 1
+    }
+    let sb = cartography.fetchTiles(b, parallel: 6) { paths in
+        expect(paths.count == 64)
+        expect(paths.all(where: { p in fileExists(p) }))
+        finished += 1
+        // (The other call may still be going: wait for it.)
+        after(seconds: 1.0) {
+            expect(finished == 2)
+        }
+    }
+    expect(sa.count == 64 && sb.count == 64)
+}
