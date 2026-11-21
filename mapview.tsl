@@ -28,6 +28,9 @@ public view MapView(map: bind Map, scaleBar: Bool = true, zoomButtons: Bool = tr
     state moved = false
     state timer = -1
     state seen = ""
+    // Ticks left until the view counts as settled (then non-Web-Mercator
+    // maps warp their tiles again), and -1 once it has.
+    state settle = -1
 
     ZStack(alignment: .topTrailing) {
         Canvas { g in
@@ -45,7 +48,6 @@ public view MapView(map: bind Map, scaleBar: Bool = true, zoomButtons: Bool = tr
         }
         .onResize { w, h in
             map.vp.resize(w, h)
-            mapViewUpdate(map: map)
         }
         .onPointer { e in
             if e.kind == .down {
@@ -100,7 +102,22 @@ public view MapView(map: bind Map, scaleBar: Bool = true, zoomButtons: Bool = tr
             let now = mapViewKey(map)
             if now != seen {
                 seen = now
-                mapViewUpdate(map: map)
+                settle = 12
+                // Tiles the new view needs, a few at a time.
+                let started = fetchTiles(map, arrived: { path, ok in
+                    map.loading.remove(path)
+                }) { paths in
+                    // (Not counted as a change of view: no version bump.)
+                    let _warped = warpTileLayers(map)
+                }
+                for path in started {
+                    map.loading.insert(path)
+                }
+            } else if settle > 0 {
+                settle -= 1
+            } else if settle == 0 {
+                settle = -1
+                let _warped = warpTileLayers(map)
             }
         }
     }
@@ -109,8 +126,4 @@ public view MapView(map: bind Map, scaleBar: Bool = true, zoomButtons: Bool = tr
 // A text that changes whenever what the map shows changes.
 private fn mapViewKey(_ m: Map) -> String {
     "{m.vp.centerX},{m.vp.centerY},{m.vp.scale},{m.vp.angle},{m.vp.width},{m.vp.height},{m.version},{m.layers.count}"
-}
-
-// What a MapView does after its view changes: nothing yet (tiles hook in here).
-private fn mapViewUpdate(map: Map) {
 }
