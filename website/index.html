@@ -1,0 +1,324 @@
+<!doctype html>
+<!--
+  cartography's website: https://cartography-package.syncster.dev
+  Author: Alexius Academia
+  Date: 2026-11-22
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="author" content="Alexius Academia">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cartography · Maps for Tessel</title>
+  <meta name="description" content="cartography is a Tessel library for maps: vector layers with styles, labels and legends, basemap tiles, rasters with color ramps, hillshade and contours, and GeoJSON, Shapefile, GeoPackage, KML, GPX, CSV, WKT and GeoTIFF files, in any coordinate system.">
+  <meta name="theme-color" content="#15803d">
+  <link rel="canonical" href="https://cartography-package.syncster.dev/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="cartography">
+  <meta property="og:title" content="cartography · Maps for Tessel">
+  <meta property="og:description" content="A ready-made MapView, or a Map you draw yourself: styled vector layers, OpenStreetMap and other basemaps, rasters with hillshade and contours, and the common GIS files, in any coordinate system.">
+  <meta property="og:url" content="https://cartography-package.syncster.dev/">
+  <meta property="og:image" content="https://cartography-package.syncster.dev/assets/share.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="The world in Equal Earth, countries colored by continent, with rivers and the largest cities">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#15803d"/><path d="M6 9 L12 7 L20 10 L26 8 V23 L20 25 L12 22 L6 24 Z" fill="none" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 7 V22 M20 10 V25" stroke="#fff" stroke-width="1.4"/></svg>
+      cartography <small>for Tessel</small>
+    </a>
+    <nav>
+      <a href="#features">Features</a>
+      <a href="#files" class="optional">Files</a>
+      <a href="#reference" class="optional">Reference</a>
+      <a href="https://github.com/alexiusacademia/cartography">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<div class="hero">
+  <div class="wrap">
+    <div>
+      <p class="eyebrow">A Tessel library</p>
+      <h1>Maps for Tessel apps.</h1>
+      <p class="lede">A ready-made map view, or a Map you draw on your own Canvas. Vector layers with styles, labels and legends; OpenStreetMap and other basemaps; rasters with color ramps, hillshade and contours; GeoJSON, Shapefile, GeoPackage, KML, GPX, CSV, WKT and GeoTIFF. In any coordinate system.</p>
+      <div class="install">
+        <code>tessel add cartography</code>
+        <button class="copy" type="button" data-copy="tessel add cartography">Copy</button>
+      </div>
+      <div class="buttons">
+        <a class="button primary" href="#features">See what it does</a>
+        <a class="button" href="https://github.com/alexiusacademia/cartography">Code on GitHub</a>
+      </div>
+      <p class="meta">MIT licence · Tessel 0.24 or later · uses <a href="https://geodesy-package.syncster.dev">geodesy</a> and <a href="https://viewport-package.syncster.dev">viewport</a></p>
+    </div>
+    <figure class="shot">
+      <img src="assets/world.png" width="2000" height="1040" alt="The world in Equal Earth: countries colored by continent, rivers in blue, and the largest cities labeled, with a legend">
+    </figure>
+  </div>
+</div>
+
+<section id="features">
+  <div class="wrap">
+    <h2>What it does</h2>
+    <p class="intro">Every picture here is drawn by cartography itself, by the program in <code>examples/pictures</code>.</p>
+
+    <div class="features2">
+
+      <article class="fcard">
+        <img src="assets/basemap.png" width="1600" height="1000" loading="lazy" alt="OpenStreetMap under Luzon, with Manila and Baguio marked by red stars">
+        <div class="body">
+          <h3>A map in an app</h3>
+          <p>MapView pans, zooms (wheel, pinch, double click, a box), finds what was clicked, downloads basemap tiles as the view moves, and shows a scale bar, zoom buttons, a north arrow and a legend.</p>
+<pre class="tsl">state m = startingMap()
+
+cartography.MapView(map: m, legend: true) { hit in
+    if let h = hit {
+        picked = m.attributes(h)
+    }
+}</pre>
+        </div>
+      </article>
+
+      <article class="fcard">
+        <img src="assets/population.png" width="2000" height="1040" loading="lazy" alt="Population by country in five natural-breaks classes from pale yellow to dark red">
+        <div class="body">
+          <h3>Styles and labels</h3>
+          <p>Ten marker shapes or pictures, dashed and cased lines, hatched fills. Classes by category, equal intervals, quantiles, natural breaks or pretty breaks, on 16 color ramps. Labels where there's room, along lines and curved with them.</p>
+<pre class="tsl">var c = layers[0]
+c.style = cartography.graduatedStyle(layer: c, field: "POP_EST",
+    mode: .naturalBreaks, count: 5, ramp: "YlOrRd")
+c.labels = cartography.LabelStyle(enabled: true, field: "NAME")
+m.add(c)</pre>
+        </div>
+      </article>
+
+      <article class="fcard">
+        <img src="assets/terrain.png" width="1400" height="1040" loading="lazy" alt="A DEM colored by height over its hillshade, with brown contour lines labeled every 25 meters">
+        <div class="body">
+          <h3>Rasters and terrain</h3>
+          <p>GeoTIFF in every common layout and compression, ASCII grids, SRTM, pictures with world files. Gray, ramp, hillshade and RGB looks, warped into the map's system. Hillshade, slope and aspect match gdaldem; contours come back as a line layer.</p>
+<pre class="tsl">if let read = cartography.readRaster("dem.tif").value() {
+    var dem = read
+    dem.rasterStyle = cartography.rampRasterStyle(dem, ramp: "Terrain")
+    dem.opacity = 0.75
+    m.add(cartography.hillshade(dem))
+    m.add(dem)
+    m.add(cartography.contours(dem, interval: 25))
+}</pre>
+        </div>
+      </article>
+
+      <article class="fcard">
+        <div class="body">
+          <h3>Any coordinate system</h3>
+          <p>A map is drawn in any system geodesy knows: an EPSG code, a PROJ string or WKT. Layers are reprojected as they're added, rasters and basemap tiles are warped, and the scale is measured on the ground.</p>
+<pre class="tsl">var m = cartography.Map(crs: geodesy.epsg(32651) ?? cartography.webMercator())
+m.add(cartography.openStreetMap())       // warped into UTM 51N
+m.centerOn(lon: 121.0, lat: 14.6, scale: 50000)
+m.setCrs(cartography.lonLat())           // the same place, in degrees</pre>
+          <h3 style="margin-top:18px">Basemaps</h3>
+          <p>OpenStreetMap, OpenTopoMap, CARTO, Esri and USGS tiles, any <code>{z}/{x}/{y}</code> address, or WMS, each with its attribution in the corner. Downloads are polite: a few at a time, cached on disk, with a User-Agent.</p>
+        </div>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<section id="ways">
+  <div class="wrap">
+    <h2>In a program</h2>
+    <p class="intro">A Map is a plain value: build it, change it, draw it, or save it as a picture without a window.</p>
+    <div class="examples">
+      <article class="example">
+        <h3>A map app in twenty lines</h3>
+        <p>OpenStreetMap under a GeoPackage's layers; clicking a feature shows its values.</p>
+<pre class="tsl">import cartography
+
+fn startingMap() -> cartography.Map {
+    var m = cartography.Map()
+    m.add(cartography.openStreetMap())
+    if let layers = cartography.readLayers("parcels.gpkg").value() {
+        for layer in layers {
+            m.add(layer)
+        }
+    }
+    m
+}
+
+app Parcels(title: "Parcels", width: 900, height: 600) {
+    state m = startingMap()
+    state picked = ""
+
+    VStack(spacing: 0) {
+        cartography.MapView(map: m, legend: true) { hit in
+            if let h = hit {
+                picked = m.attributes(h).map { p in "{p.0}: {p.1}" }.joined(separator: ", ")
+            }
+        }
+        Text(picked).padding(8)
+    }
+}</pre>
+      </article>
+      <article class="example">
+        <h3>Converting files, and a picture</h3>
+        <p>A shapefile in a national grid to GeoJSON (always in WGS 84), and a PNG of it with a legend and scale bar.</p>
+<pre class="tsl">import cartography
+
+fn main() {
+    match cartography.readLayers("lots.shp") {
+        .failure(e) -> print(e.message)
+        .ok(layers) -> {
+            let lots = layers[0]
+            if let e = cartography.writeLayer(lots, "lots.geojson") {
+                print(e.message)
+            }
+            var m = cartography.Map()
+            m.add(lots)
+            m.vp.resize(800, 600)
+            m.vp.smooth = false
+            m.fitAll()
+            let _ok = renderImage(path: "lots.png", width: 800, height: 600, scale: 2) { g in
+                m.draw(g)
+                let _size = cartography.drawLegend(g, m, x: 12, y: 12)
+                cartography.drawMapScaleBar(g, m, x: 16, y: 584)
+            }
+        }
+    }
+}</pre>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section id="files">
+  <div class="wrap">
+    <h2>Files</h2>
+    <p class="intro"><code>readLayers(path)</code> reads any of these by extension; <code>writeLayer(layer, path)</code> writes vector layers. Readers give <code>Result</code>s with errors that say what's wrong; writers give <code>Error?</code>.</p>
+    <div class="table"><table>
+      <tr><th>Format</th><th>Read</th><th>Write</th></tr>
+      <tr><td>GeoJSON</td><td><code>readGeoJSON(text)</code></td><td><code>geoJSON(layer)</code>, in WGS 84</td></tr>
+      <tr><td>Shapefile (.shp, .dbf, .shx, .prj, .cpg)</td><td><code>readShapefile(path)</code></td><td><code>writeShapefile(layer, path)</code></td></tr>
+      <tr><td>GeoPackage</td><td><code>readGeoPackage(path)</code></td><td><code>writeGeoPackage(layers, path)</code></td></tr>
+      <tr><td>KML · GPX (waypoints, routes, tracks)</td><td><code>readKML</code> · <code>readGPX</code></td><td><code>kml(layer)</code> · <code>gpx(layers)</code></td></tr>
+      <tr><td>CSV with x/y or WKT columns</td><td><code>readCSV(text, x:, y:, wkt:, crs:)</code></td><td><code>csv(layer)</code></td></tr>
+      <tr><td>WKT · WKB</td><td><code>geometryFromWkt</code>, <code>readWKT</code> · <code>geometryFromWkb</code></td><td><code>wkt(g)</code>, <code>wktLines</code> · <code>wkb(g)</code></td></tr>
+      <tr><td>GeoTIFF (strips, tiles; LZW, Deflate, PackBits; 8–64 bit; bands)</td><td><code>readGeoTIFF(path)</code></td><td><code>writeGeoTIFF(layer, path)</code></td></tr>
+      <tr><td>ASCII grid · SRTM .hgt · PNG/JPEG + world file</td><td><code>readAsciiGrid</code> · <code>readHGT</code> · <code>readWorldPicture</code></td><td><code>writeAsciiGrid</code></td></tr>
+    </table></div>
+  </div>
+</section>
+
+<section id="tested">
+  <div class="wrap">
+    <h2>Checked against GDAL</h2>
+    <p class="intro">Python programs ask GDAL (through pyogrio and rasterio), shapely, mercantile and contourpy for the answers, and cartography has to agree; GDAL also reads back every file cartography writes.</p>
+    <div class="stats">
+      <div class="stat"><b>138</b><span>tests in the library, all passing</span></div>
+      <div class="stat"><b>0</b><span>difference from GDAL in the values and coordinates it reads</span></div>
+      <div class="stat"><b>1 grey level</b><span>the most hillshade differs from gdaldem; slope within 0.0001°</span></div>
+      <div class="stat"><b>0.05 s</b><span>to warp a window's worth of basemap tiles into UTM</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="reference">
+  <div class="wrap">
+    <h2>Reference</h2>
+
+    <h3>The map</h3>
+    <div class="table"><table>
+      <tr><th>Map method</th><th>Does</th></tr>
+      <tr><td><code>add(layer)</code>, <code>insert(_:at:)</code>, <code>remove(at:)</code>, <code>move(from:to:)</code></td><td>Layers, the first at the bottom; added layers are reprojected.</td></tr>
+      <tr><td><code>refresh(i)</code>, <code>refreshAll()</code>, <code>setCrs(c)</code></td><td>Work a layer out again after a change; draw in another system.</td></tr>
+      <tr><td><code>fit(box)</code>, <code>fitAll()</code>, <code>fitLayer(i)</code>, <code>centerOn(lon:lat:scale:)</code></td><td>Where the map looks.</td></tr>
+      <tr><td><code>scaleDenominator()</code>, <code>setScaleDenominator(n)</code></td><td>The scale 1:N, on the ground.</td></tr>
+      <tr><td><code>toLonLat(sx, sy)</code>, <code>fromLonLat(lon, lat)</code>, <code>toMap</code>, <code>toScreen</code></td><td>Between the screen and the map.</td></tr>
+      <tr><td><code>featuresAt(sx, sy)</code>, <code>featureAt</code>, <code>featuresIn(layer:…)</code>, <code>attributes(hit)</code></td><td>Finding features and their values.</td></tr>
+      <tr><td><code>select(layer:rows:)</code>, <code>clearSelection()</code>, <code>draw(g)</code>, <code>savePicture(path, width:, height:)</code></td><td>Selections and drawing.</td></tr>
+    </table></div>
+
+    <h3>Around the map</h3>
+    <div class="table"><table>
+      <tr><th>Function or view</th><th>Gives</th></tr>
+      <tr><td><code>MapView(map:, scaleBar:, zoomButtons:, northArrow:, legend:, imperial:, selects:, keys:, onMouse:, onClick:)</code></td><td>The ready-made view.</td></tr>
+      <tr><td><code>drawLegend(g, m, x:, y:)</code>, <code>legendEntries(m)</code></td><td>A legend of the visible layers and their classes.</td></tr>
+      <tr><td><code>drawMapScaleBar(g, m, x:, y:, imperial:)</code>, <code>mapScaleBar(m)</code>, <code>drawNorthArrow(g, m, x:, y:)</code></td><td>Scale bar and north arrow.</td></tr>
+    </table></div>
+
+    <h3>Layers, styles, rasters and tiles</h3>
+    <div class="table"><table>
+      <tr><th>Function</th><th>Gives</th></tr>
+      <tr><td><code>pointGeometry</code>, <code>lineGeometry</code>, <code>polygonGeometry</code>, <code>multi…Geometry</code>, <code>textColumn</code>, <code>numberColumn</code></td><td>Shapes and columns for layers made in code.</td></tr>
+      <tr><td><code>categorizedStyle(layer:field:)</code>, <code>graduatedStyle(layer:field:mode:count:ramp:)</code>, <code>rampColor</code>, <code>rampNames()</code></td><td>Styles by a field's values.</td></tr>
+      <tr><td><code>readRaster(path)</code>, <code>rampRasterStyle</code>, <code>hillshade</code>, <code>slope</code>, <code>aspect</code>, <code>contours</code></td><td>Rasters and terrain.</td></tr>
+      <tr><td><code>rasterValue</code>, <code>rasterStatistics</code>, <code>rasterHistogram</code>, <code>sampleRaster</code>, <code>zonalStatistics</code></td><td>Values from rasters.</td></tr>
+      <tr><td><code>openStreetMap()</code>, <code>tileSources()</code>, <code>tileLayer(s)</code>, <code>xyzLayer(url:…)</code>, <code>wmsLayer(service:layers:)</code></td><td>Basemap layers.</td></tr>
+      <tr><td><code>fetchTiles(m, done:)</code>, <code>warpTileLayers(m)</code>, <code>clearTileCache(m)</code></td><td>Downloading tiles for a Canvas of your own.</td></tr>
+    </table></div>
+    <p class="intro" style="margin-top:14px">Map data in the pictures is from <a href="https://www.naturalearthdata.com">Natural Earth</a> (public domain); the basemap is © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors.</p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>cartography · MIT licence · © 2026 <a href="https://syncster.dev" rel="author">Alexius Academia</a> · <a href="mailto:admin@syncster.dev">admin@syncster.dev</a> · <a href="https://syncster.dev">syncster.dev</a></span>
+    <nav>
+      <a href="https://github.com/alexiusacademia/cartography">GitHub</a>
+      <a href="https://tessel-lang.syncster.dev">Tessel</a>
+      <a href="https://tessel-packages.syncster.dev">Libraries</a>
+      <a href="https://geodesy-package.syncster.dev">geodesy</a>
+      <a href="https://viewport-package.syncster.dev">viewport</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+// Colours the Tessel code: keywords, strings, numbers and comments.
+(function () {
+  const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const keywords = /^(import|fn|var|let|if|else|for|in|while|return|match|try|true|false|nil|app|state|struct|view|bind)$/;
+  const token = /(\/\/[^\n]*)|("(?:\\.|[^"\\])*")|(\b\d+(?:\.\d+)?(?:e-?\d+)?\b)|([A-Za-z_]\w*)/g;
+  for (const pre of document.querySelectorAll("pre.tsl")) {
+    const text = pre.textContent;
+    let out = "", last = 0, m;
+    token.lastIndex = 0;
+    while ((m = token.exec(text))) {
+      out += esc(text.slice(last, m.index));
+      const t = esc(m[0]);
+      if (m[1]) out += '<span class="c">' + t + "</span>";
+      else if (m[2]) out += '<span class="s">' + t + "</span>";
+      else if (m[3]) out += '<span class="n">' + t + "</span>";
+      else if (keywords.test(m[4])) out += '<span class="k">' + t + "</span>";
+      else out += t;
+      last = token.lastIndex;
+    }
+    pre.innerHTML = out + esc(text.slice(last));
+  }
+  for (const b of document.querySelectorAll("[data-copy]")) {
+    b.addEventListener("click", () => {
+      navigator.clipboard.writeText(b.dataset.copy).then(() => {
+        b.textContent = "Copied";
+        setTimeout(() => { b.textContent = "Copy"; }, 1500);
+      }, () => {});
+    });
+  }
+})();
+</script>
+</body>
+</html>
