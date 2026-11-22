@@ -1,0 +1,50 @@
+// cartography gallery: "csv-points", one of the programs on the website's
+// examples page. Check it with `tessel check examples/gallery/csv-points`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../../.."
+
+// Rain gauges from a CSV file (with lon and lat columns), colored by their
+// kind and sized by their yearly rainfall, saved as a picture over
+// OpenStreetMap and as a GeoJSON file.
+fn main() {
+    let text = readFile("gauges.csv") ?? ""
+    let info = cartography.inspectCSV(text)
+    print("{info.rows} rows; x = {info.xField}, y = {info.yField}; fields: {info.fields.joined(separator: ", ")}")
+
+    match cartography.readCSV(text, name: "Rain gauges") {
+        .failure(e) -> print(e.message)
+        .ok(read) -> {
+            var gauges = read
+            gauges.style = cartography.categorizedStyle(layer: gauges, field: "kind")
+            gauges.style.sizeField = "rain_mm"
+            gauges.style.sizeFrom = 6
+            gauges.style.sizeTo = 22
+            // Names only from 1:1,000,000 in.
+            gauges.labels = cartography.LabelStyle(enabled: true, field: "station", size: 10,
+                placement: .right, distance: 3, minScale: 1000000)
+
+            var m = cartography.Map()
+            m.add(cartography.openStreetMap())
+            m.add(gauges)
+            m.vp.resize(900, 600)
+            m.vp.smooth = false
+            m.fitAll()
+
+            // Tiles first, then the picture.
+            let _started = cartography.fetchTiles(m) { paths in
+                let ok = renderImage(path: "gauges.png", width: 900, height: 600, scale: 2) { g in
+                    m.draw(g)
+                    let _size = cartography.drawLegend(g, m, x: 12, y: 12)
+                    cartography.drawMapScaleBar(g, m, x: 16, y: 584)
+                }
+                print("gauges.png: {ok}")
+            }
+            if let e = cartography.writeLayer(gauges, "gauges.geojson") {
+                print(e.message)
+            }
+        }
+    }
+}

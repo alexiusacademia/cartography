@@ -1,0 +1,35 @@
+// cartography gallery: "convert", one of the programs on the website's
+// examples page. Check it with `tessel check examples/gallery/convert`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../../.."
+
+// Reads a shapefile (in whatever system its .prj says) and writes it as
+// GeoJSON, KML, a GeoPackage and CSV, saying what it found.
+fn main() {
+    match cartography.readLayers("lots.shp") {
+        .failure(e) -> print("lots.shp: {e.message}")
+        .ok(layers) -> {
+            for layer in layers {
+                print("{layer.name}: {layer.featureCount()} features")
+                print("  fields: {layer.fieldNames().joined(separator: ", ")}")
+                let b = layer.extent()
+                print("  extent: {b.minX}, {b.minY} – {b.maxX}, {b.maxY}")
+            }
+            let lots = layers[0]
+            for path in ["lots.geojson", "lots.kml", "lots.csv"] {
+                if let e = cartography.writeLayer(lots, path) {
+                    print("{path}: {e.message}")
+                } else {
+                    print("wrote {path}")
+                }
+            }
+            // A GeoPackage can hold several layers.
+            if let e = cartography.writeGeoPackage(layers, "lots.gpkg") {
+                print("lots.gpkg: {e.message}")
+            }
+        }
+    }
+}

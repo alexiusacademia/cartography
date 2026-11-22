@@ -1,0 +1,815 @@
+<!doctype html>
+<!--
+  cartography's examples: https://cartography-package.syncster.dev/examples.html
+  Every program here passes `tessel check`, and the ones that print or draw
+  were run to make what's shown.
+  Author: Alexius Academia
+  Date: 2026-11-22
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="author" content="Alexius Academia">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Examples · cartography</title>
+  <meta name="description" content="Whole Tessel programs that use cartography: map apps, maps saved as pictures, file conversion, layers made in code, terrain and raster statistics.">
+  <meta name="theme-color" content="#15803d">
+  <link rel="canonical" href="https://cartography-package.syncster.dev/examples.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="cartography">
+  <meta property="og:title" content="Examples · cartography">
+  <meta property="og:description" content="Whole programs: map apps, maps saved as pictures, files, terrain and raster statistics.">
+  <meta property="og:url" content="https://cartography-package.syncster.dev/examples.html">
+  <meta property="og:image" content="https://cartography-package.syncster.dev/assets/share.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#15803d"/><path d="M6 9 L12 7 L20 10 L26 8 V23 L20 25 L12 22 L6 24 Z" fill="none" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 7 V22 M20 10 V25" stroke="#fff" stroke-width="1.4"/></svg>
+      cartography <small>for Tessel</small>
+    </a>
+    <nav>
+      <a href="docs.html">Docs</a>
+      <a href="examples.html" aria-current="page">Examples</a>
+      <a href="https://github.com/alexiusacademia/cartography">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap docs-layout">
+  <aside class="sidenav">
+<p class="navgroup">Apps</p><ul>
+<li><a href="#first-map">A first map</a></li>
+<li><a href="#find-places">Find places by name</a></li>
+<li><a href="#gpx-track">A GPX track over a choice of basemaps</a></li>
+<li><a href="#utm">A map in UTM</a></li>
+<li><a href="#own-canvas">A map on your own Canvas</a></li>
+</ul>
+<p class="navgroup">Pictures</p><ul>
+<li><a href="#world">The world in Equal Earth</a></li>
+<li><a href="#choropleth">Population by country</a></li>
+<li><a href="#terrain">Terrain: hillshade and contours</a></li>
+<li><a href="#csv-points">Points from a CSV file</a></li>
+</ul>
+<p class="navgroup">Files and data</p><ul>
+<li><a href="#convert">Converting files</a></li>
+<li><a href="#build-layer">A layer made in code</a></li>
+<li><a href="#raster-stats">Numbers from a DEM</a></li>
+</ul>
+  </aside>
+
+  <div class="doc-body">
+    <header class="doc-head">
+      <p class="eyebrow">Examples</p>
+      <h1>Whole programs</h1>
+      <p class="lede">12 programs that use cartography, from a first map to terrain analysis. Each one passes <code>tessel check</code>, and the ones that draw or print were run to make what's shown here.</p>
+      <div class="howto">
+        <p><b>To run one:</b> make a project with <code>tessel new maps</code>, then <code>tessel add cartography</code> in it. Put the program in <code>main.tsl</code> and run <code>tessel run .</code>. Examples that call <code>geodesy</code> or <code>viewport</code> themselves also need <code>tessel add geodesy</code> or <code>tessel add viewport</code>.</p>
+        <p><b>Data:</b> <code>countries.geojson</code>, <code>rivers.geojson</code> and <code>places.geojson</code> are in the library's <a href="https://github.com/alexiusacademia/cartography/tree/main/examples/data"><code>examples/data</code></a> (from Natural Earth); <code>dem.tif</code> is in <a href="https://github.com/alexiusacademia/cartography/tree/main/tests/data/raster"><code>tests/data/raster</code></a>. For the others, use files of your own.</p>
+        <p><b>In the repository:</b> each program is in <a href="https://github.com/alexiusacademia/cartography/tree/main/examples/gallery"><code>examples/gallery</code></a>, in a folder of its own.</p>
+      </div>
+    </header>
+
+<h2 class="exgroup">Apps</h2>
+
+<article class="program" id="first-map">
+<div class="program-head">
+<div>
+<h3><a href="#first-map">A first map</a></h3>
+<p>OpenStreetMap in a window, with two towns made in code as red stars with their names. MapView pans, zooms, downloads tiles and draws the scale bar and north arrow.</p>
+<div class="tags"><span>MapView</span><span>openStreetMap</span><span>Layer</span><span>Symbol</span><span>LabelStyle</span></div>
+</div>
+<figure class="shot"><img src="assets/basemap.png" width="1600" height="1000" loading="lazy" alt="OpenStreetMap under Luzon with towns marked by red stars"><figcaption>A map like it, drawn by the library&rsquo;s examples/pictures</figcaption></figure>
+</div>
+<div class="code-wrap"><div class="code-bar"><span>first-map.tsl</span><span>an app · 25 lines</span></div>
+<pre class="tsl">import cartography
+
+// A layer of points made in code: two towns, as red stars with their names.
+fn towns() -&gt; cartography.Layer {
+    var t = cartography.Layer(name: "Towns", geomKind: .point)
+    t.geoms = [cartography.pointGeometry(121.0, 14.6), cartography.pointGeometry(120.6, 16.4)]
+    t.columns = [cartography.textColumn(name: "name", values: ["Manila", "Baguio"])]
+    t.style.symbol = cartography.Symbol(fill: cartography.rgb(220, 40, 40), size: 12, marker: .star)
+    t.labels = cartography.LabelStyle(enabled: true, field: "name", bold: true)
+    t
+}
+
+fn startingMap() -&gt; cartography.Map {
+    var m = cartography.Map()                  // Web Mercator
+    m.add(cartography.openStreetMap())
+    m.add(towns())                             // also places the map on them
+    m.centerOn(lon: 121.0, lat: 15.5, scale: 2000000)
+    m
+}
+
+app FirstMap(title: "First map", width: 800, height: 600) {
+    state m = startingMap()
+
+    cartography.MapView(map: m, northArrow: true)
+}</pre></div>
+</article>
+
+<article class="program" id="find-places">
+<div class="program-head">
+<div>
+<h3><a href="#find-places">Find places by name</a></h3>
+<p>A search box filters a layer: features whose names don't match go into <code>hidden</code>, which leaves them out of the drawing and of clicks. Clicking a place shows its name and country. On CARTO Positron tiles.</p>
+<div class="tags"><span>hidden</span><span>refresh</span><span>fitLayer</span><span>attributes</span><span>tileSource</span></div>
+</div>
+</div>
+<div class="code-wrap"><div class="code-bar"><span>find-places.tsl</span><span>an app · 51 lines</span></div>
+<pre class="tsl">import cartography
+
+fn startingMap() -&gt; cartography.Map {
+    var m = cartography.Map()
+    m.add(cartography.tileLayer(cartography.tileSource(named: "CARTO Positron") ?? cartography.tileSources()[0]))
+    if let layers = cartography.readLayers("places.geojson").value() {
+        var places = layers[0]
+        places.style.symbol = cartography.Symbol(fill: cartography.rgb(21, 128, 61), size: 7)
+        places.labels = cartography.LabelStyle(enabled: true, field: "NAME", size: 10, background: true)
+        m.add(places)
+    }
+    m
+}
+
+app FindPlaces(title: "Find places", width: 900, height: 620) {
+    state m = startingMap()
+    state query = ""
+    state found = ""
+
+    VStack(spacing: 0) {
+        HStack {
+            TextField("Find a place", text: query).onSubmit { search() }
+            Button("Find") { search() }
+            Button("Show all") {
+                query = ""
+                search()
+            }
+            Text(found).color(.secondary)
+        }
+        .padding(8)
+        cartography.MapView(map: m) { hit in
+            if let h = hit {
+                found = m.attributes(h).filter { p in p.0 == "NAME" || p.0 == "ADM0NAME" }
+                    .map { p in p.1 }.joined(separator: ", ")
+            }
+        }
+    }
+
+    // Hides the places whose names don't have the query in them, then
+    // shows the ones that are left.
+    fn search() {
+        if let i = m.layerIndex(named: "places") {
+            let q = query.trim().lowercase()
+            let names = m.layers[i].columnIndex("NAME") ?? 0
+            m.layers[i].hidden = m.layers[i].columns[names].texts.map { n in q != "" &amp;&amp; !n.lowercase().contains(q) }
+            m.refresh(i)
+            found = "{m.layers[i].shownCount()} places"
+            m.fitLayer(i)
+        }
+    }
+}</pre></div>
+</article>
+
+<article class="program" id="gpx-track">
+<div class="program-head">
+<div>
+<h3><a href="#gpx-track">A GPX track over a choice of basemaps</a></h3>
+<p>Reads a GPX file's track and waypoints. The track is a cased line with arrows along it showing which way it goes; the waypoints are labeled to their right. A menu swaps the basemap at the bottom of the map.</p>
+<div class="tags"><span>readLayers</span><span>GPX</span><span>markerLine</span><span>insert</span><span>remove</span><span>onMouse</span></div>
+</div>
+</div>
+<div class="code-wrap"><div class="code-bar"><span>gpx-track.tsl</span><span>an app · 53 lines</span></div>
+<pre class="tsl">import cartography
+
+// A GPX track over a choice of basemaps, its direction shown by arrows
+// along it, with the waypoints labeled.
+fn startingMap() -&gt; cartography.Map {
+    var m = cartography.Map()
+    m.add(cartography.tileLayer(cartography.tileSource(named: "OpenTopoMap") ?? cartography.tileSources()[0]))
+    match cartography.readLayers("hike.gpx") {
+        .failure(e) -&gt; print(e.message)
+        .ok(layers) -&gt; {
+            for read in layers {
+                var layer = read
+                if layer.geomKind == .line {
+                    layer.style.symbol = cartography.Symbol(stroke: cartography.rgb(200, 30, 90), strokeWidth: 3,
+                        size: 7, marker: .arrow, markerLine: true, markerInterval: 60, casing: true)
+                } else {
+                    layer.style.symbol = cartography.Symbol(fill: cartography.rgb(255, 200, 0), size: 10, marker: .triangle)
+                    layer.labels = cartography.LabelStyle(enabled: true, field: "name", placement: .right, distance: 4)
+                }
+                m.add(layer)
+            }
+        }
+    }
+    m
+}
+
+app Hike(title: "Hike", width: 1000, height: 700) {
+    state m = startingMap()
+    state basemap = "OpenTopoMap"
+    state place = ""
+
+    VStack(spacing: 0) {
+        HStack {
+            Picker(selection: basemap, style: .menu) {
+                Text("OpenTopoMap").tag("OpenTopoMap")
+                Text("OpenStreetMap").tag("OpenStreetMap")
+                Text("Esri World Imagery").tag("Esri World Imagery")
+            }
+            Button("Change basemap") {
+                if let s = cartography.tileSource(named: basemap) {
+                    m.remove(at: 0)
+                    m.insert(cartography.tileLayer(s), at: 0)
+                }
+            }
+            Spacer()
+            Text(place).color(.secondary)
+        }
+        .padding(8)
+        cartography.MapView(map: m, northArrow: true, legend: true, onMouse: { lon, lat in
+            place = "{lat.formatted(decimals: 5)}, {lon.formatted(decimals: 5)}"
+        })
+    }
+}</pre></div>
+</article>
+
+<article class="program" id="utm">
+<div class="program-head">
+<div>
+<h3><a href="#utm">A map in UTM</a></h3>
+<p>The same OpenStreetMap tiles, warped into UTM zone 51N. The scale is measured on the ground, the mouse shows eastings and northings, and buttons redraw the map in other systems without losing its place.</p>
+<div class="tags"><span>geodesy.epsg</span><span>setCrs</span><span>transformCoords</span><span>scaleDenominator</span></div>
+</div>
+</div>
+<div class="code-wrap"><div class="code-bar"><span>utm.tsl</span><span>an app · 35 lines</span></div>
+<pre class="tsl">import cartography
+import geodesy
+
+// A map drawn in UTM zone 51N rather than Web Mercator: OpenStreetMap's
+// tiles are warped to fit, the scale is measured on the ground, and the
+// mouse shows eastings and northings.
+fn startingMap() -&gt; cartography.Map {
+    var m = cartography.Map(crs: geodesy.epsg(32651) ?? cartography.webMercator())
+    m.add(cartography.openStreetMap())
+    m.credit = "UTM 51N"
+    m.centerOn(lon: 121.0, lat: 14.6, scale: 50000)
+    m
+}
+
+app Utm(title: "UTM", width: 900, height: 640) {
+    state m = startingMap()
+    state xy = ""
+
+    VStack(spacing: 0) {
+        cartography.MapView(map: m, imperial: false, keys: true, onMouse: { lon, lat in
+            let p = cartography.transformCoords(from: cartography.lonLat(), to: m.crs, coords: [lon, lat])
+            xy = "E {cartography.groupedNumber(p[0])}  N {cartography.groupedNumber(p[1])}"
+        })
+        HStack {
+            Button("UTM 51N") { m.setCrs(geodesy.epsg(32651) ?? cartography.webMercator()) }
+            Button("Web Mercator") { m.setCrs(cartography.webMercator()) }
+            Button("Degrees") { m.setCrs(cartography.lonLat()) }
+            Spacer()
+            Text(xy)
+            Text("1:{cartography.groupedNumber(m.scaleDenominator())}").color(.secondary)
+        }
+        .font(size: 12)
+        .padding(8)
+    }
+}</pre></div>
+</article>
+
+<article class="program" id="own-canvas">
+<div class="program-head">
+<div>
+<h3><a href="#own-canvas">A map on your own Canvas</a></h3>
+<p>Everything MapView does by hand: resizing the viewport, passing it pointer events, downloading the tiles each new view needs, and clicking to select. A button selects the features in view with <code>featuresIn</code>.</p>
+<div class="tags"><span>Canvas</span><span>vp.handle</span><span>fetchTiles</span><span>featuresIn</span><span>drawNorthArrow</span></div>
+</div>
+</div>
+<div class="code-wrap"><div class="code-bar"><span>own-canvas.tsl</span><span>an app · 80 lines</span></div>
+<pre class="tsl">import cartography
+import viewport
+
+// A map on a Canvas of your own rather than MapView: it pans and zooms
+// through the map's viewport, downloads the tiles each new view needs, and
+// counts the features inside a box drawn with Shift and a drag.
+fn startingMap() -&gt; cartography.Map {
+    var m = cartography.Map()
+    m.add(cartography.openStreetMap())
+    if let layers = cartography.readLayers("buildings.gpkg").value() {
+        for layer in layers {
+            m.add(layer)
+        }
+    }
+    m.vp.smooth = false                     // no animation, so no timer needed
+    m
+}
+
+app OwnCanvas(title: "Own canvas", width: 900, height: 640) {
+    state m = startingMap()
+    state redraw = 0
+    state status = "Drag to pan, wheel to zoom"
+
+    VStack(spacing: 0) {
+        Canvas { g in
+            let _r = redraw                 // draw again when a tile comes in
+            m.draw(g)
+            viewport.drawZoomBox(g, m.vp)
+            cartography.drawMapScaleBar(g, m, x: 14, y: g.height - 22)
+            cartography.drawNorthArrow(g, m, x: g.width - 30, y: 34)
+            let _size = cartography.drawLegend(g, m, x: 10, y: 10, maxEntries: 12)
+        }
+        .onResize { w, h in
+            m.vp.resize(w, h)
+            fetch()
+        }
+        .onPointer { e in
+            if m.vp.handle(e) {
+                fetch()
+            }
+            if e.kind == .up &amp;&amp; e.button == .left &amp;&amp; e.clicks == 1 {
+                if let h = m.featureAt(e.x, e.y) {
+                    m.select(layer: h.layer, rows: [h.row])
+                    status = "{m.layers[h.layer].name}, row {h.row}"
+                } else {
+                    m.clearSelection()
+                }
+            }
+        }
+        HStack {
+            Text(status)
+            Spacer()
+            Button("Count in view") { countInView() }
+        }
+        .padding(8)
+    }
+
+    // Starts downloading the tiles the view needs and isn't showing yet.
+    fn fetch() {
+        let started = cartography.fetchTiles(m, userAgent: "OwnCanvas/1.0", arrived: { path, ok in
+            m.loading.remove(path)
+            redraw += 1
+        }) { paths in
+            if cartography.warpTileLayers(m) {     // only for maps not in Web Mercator
+                redraw += 1
+            }
+        }
+        for path in started {
+            m.loading.insert(path)
+        }
+    }
+
+    // How many features of the top layer are in the view.
+    fn countInView() {
+        let top = m.layers.count - 1
+        let rows = m.featuresIn(layer: top, 0, 0, m.vp.width, m.vp.height)
+        m.select(layer: top, rows: rows)
+        status = "{rows.count} of {m.layers[top].featureCount()} in view"
+    }
+}</pre></div>
+</article>
+
+<h2 class="exgroup">Pictures</h2>
+
+<article class="program" id="world">
+<div class="program-head">
+<div>
+<h3><a href="#world">The world in Equal Earth</a></h3>
+<p>Countries colored by continent, rivers, and only the cities of eight million people or more, in the Equal Earth projection. Saved as a PNG with a legend and scale bar, without a window.</p>
+<div class="tags"><span>categorizedStyle</span><span>hidden</span><span>renderImage</span><span>drawLegend</span><span>EPSG:8857</span></div>
+</div>
+<figure class="shot"><img src="assets/world.png" width="2000" height="1040" loading="lazy" alt="The world in Equal Earth, countries colored by continent, with rivers and the largest cities"><figcaption>What it draws</figcaption></figure>
+</div>
+<div class="code-wrap"><div class="code-bar"><span>world.tsl</span><span>a program · 49 lines</span></div>
+<pre class="tsl">import cartography
+import geodesy
+
+fn layerOf(_ path: String) -&gt; cartography.Layer {
+    match cartography.readLayers(path) {
+        .ok(layers) -&gt; layers[0]
+        .failure(e) -&gt; {
+            print(e.message)
+            exit(1)
+            cartography.Layer()
+        }
+    }
+}
+
+fn main() {
+    // Equal Earth (EPSG:8857), on a pale blue sea.
+    var m = cartography.Map(crs: geodesy.epsg(8857) ?? cartography.lonLat(), background: .rgb(214, 232, 245))
+
+    // Countries: a color for each continent, with white borders.
+    var countries = layerOf("countries.geojson")
+    countries.style = cartography.categorizedStyle(layer: countries, field: "CONTINENT")
+    for i in 0..countries.style.classes.count {
+        countries.style.classes[i].symbol.stroke = cartography.rgb(255, 255, 255)
+        countries.style.classes[i].symbol.strokeWidth = 0.5
+    }
+    m.add(countries)
+
+    var rivers = layerOf("rivers.geojson")
+    rivers.style.symbol = cartography.Symbol(stroke: cartography.rgb(70, 130, 200), strokeWidth: 1.0)
+    m.add(rivers)
+
+    // Only the cities of eight million people or more.
+    var places = layerOf("places.geojson")
+    let pop = places.columnIndex("POP_MAX") ?? 0
+    places.hidden = places.columns[pop].nums.map { p in p &lt; 8000000.0 }
+    places.style.symbol = cartography.Symbol(fill: cartography.rgb(40, 40, 40), stroke: cartography.rgb(255, 255, 255), size: 5)
+    places.labels = cartography.LabelStyle(enabled: true, field: "NAME", size: 10)
+    m.add(places)
+
+    m.vp.resize(1000, 520)
+    m.vp.smooth = false
+    m.fitAll()
+    let ok = renderImage(path: "world.png", width: 1000, height: 520, scale: 2) { g in
+        m.draw(g)
+        let _size = cartography.drawLegend(g, m, x: 12, y: 12)
+        cartography.drawMapScaleBar(g, m, x: 16, y: 504)
+    }
+    print("world.png: {ok}")
+}</pre></div>
+</article>
+
+<article class="program" id="choropleth">
+<div class="program-head">
+<div>
+<h3><a href="#choropleth">Population by country</a></h3>
+<p>A graduated style: five classes of population by natural breaks, colored yellow to red, each class labeled in millions for the legend.</p>
+<div class="tags"><span>graduatedStyle</span><span>naturalBreaks</span><span>StyleClass</span><span>formatNumber</span></div>
+</div>
+<figure class="shot"><img src="assets/population.png" width="2000" height="1040" loading="lazy" alt="Population by country in five classes from pale yellow to dark red"><figcaption>What it draws</figcaption></figure>
+</div>
+<div class="code-wrap"><div class="code-bar"><span>choropleth.tsl</span><span>a program · 42 lines</span></div>
+<pre class="tsl">import cartography
+import geodesy
+
+fn millions(_ x: Float) -&gt; String {
+    cartography.formatNumber(round(x / 100000.0) / 10.0, decimals: 1)
+}
+
+fn main() {
+    var layers: [cartography.Layer] = []
+    match cartography.readLayers("countries.geojson") {
+        .ok(read) -&gt; { layers = read }
+        .failure(e) -&gt; {
+            print(e.message)
+            return
+        }
+    }
+    var m = cartography.Map(crs: geodesy.epsg(8857) ?? cartography.lonLat(), background: .rgb(245, 245, 245))
+
+    // Five classes of population by natural breaks (Jenks), yellow to red,
+    // each labeled in millions.
+    var countries = layers[0]
+    countries.name = "Population"
+    countries.style = cartography.graduatedStyle(layer: countries, field: "POP_EST",
+        mode: .naturalBreaks, count: 5, ramp: "YlOrRd")
+    for i in 0..countries.style.classes.count {
+        let c = countries.style.classes[i]
+        countries.style.classes[i].label = "{millions(c.lower)} – {millions(c.upper)} M"
+        countries.style.classes[i].symbol.stroke = cartography.rgb(120, 120, 120)
+        countries.style.classes[i].symbol.strokeWidth = 0.4
+    }
+    m.add(countries)
+
+    m.vp.resize(1000, 520)
+    m.vp.smooth = false
+    m.fitAll()
+    let ok = renderImage(path: "population.png", width: 1000, height: 520, scale: 2) { g in
+        m.draw(g)
+        let _size = cartography.drawLegend(g, m, x: 12, y: 12)
+        cartography.drawMapScaleBar(g, m, x: 16, y: 504)
+    }
+    print("population.png: {ok}")
+}</pre></div>
+</article>
+
+<article class="program" id="terrain">
+<div class="program-head">
+<div>
+<h3><a href="#terrain">Terrain: hillshade and contours</a></h3>
+<p>A DEM colored along the Terrain ramp over its own shaded relief, with contour lines every 25 meters labeled along their curves. The contours are also saved as a GeoPackage.</p>
+<div class="tags"><span>readRaster</span><span>hillshade</span><span>rampRasterStyle</span><span>contours</span><span>curved</span></div>
+</div>
+<figure class="shot"><img src="assets/terrain.png" width="1400" height="1040" loading="lazy" alt="A DEM colored by height over its hillshade, with labeled contour lines"><figcaption>What it draws</figcaption></figure>
+</div>
+<div class="code-wrap"><div class="code-bar"><span>terrain.tsl</span><span>a program · 46 lines</span></div>
+<pre class="tsl">import cartography
+
+fn main() {
+    var m = cartography.Map()
+    match cartography.readRaster("dem.tif") {
+        .failure(e) -&gt; print(e.message)
+        .ok(read) -&gt; {
+            var dem = read
+            dem.name = "Elevation (m)"
+
+            // Shaded relief underneath, with the land drawn twice as tall.
+            var hills = cartography.hillshade(dem, exaggeration: 2.0)
+            hills.rasterStyle.look = .gray
+            hills.rasterStyle.low = 0
+            hills.rasterStyle.high = 255
+            m.add(hills)
+
+            // The heights in color, three quarters opaque so the hills show.
+            dem.rasterStyle = cartography.rampRasterStyle(dem, ramp: "Terrain")
+            dem.opacity = 0.75
+            m.add(dem)
+
+            // Contours every 25 m, labeled along their lines.
+            var lines = cartography.contours(dem, interval: 25)
+            lines.style.symbol = cartography.Symbol(stroke: cartography.Rgba(r: 60, g: 40, b: 20, a: 0.6), strokeWidth: 0.8)
+            lines.labels = cartography.LabelStyle(enabled: true, field: "elev", size: 9,
+                color: cartography.rgb(80, 50, 20), curved: true)
+            m.add(lines)
+
+            m.vp.resize(700, 520)
+            m.vp.smooth = false
+            m.fitAll()
+            let ok = renderImage(path: "terrain.png", width: 700, height: 520, scale: 2) { g in
+                m.draw(g)
+                let _size = cartography.drawLegend(g, m, x: 12, y: 12)
+                cartography.drawMapScaleBar(g, m, x: 16, y: 504)
+            }
+            print("terrain.png: {ok}")
+
+            // The contours as a GeoPackage, for QGIS.
+            if let e = cartography.writeLayer(lines, "contours.gpkg") {
+                print(e.message)
+            }
+        }
+    }
+}</pre></div>
+</article>
+
+<article class="program" id="csv-points">
+<div class="program-head">
+<div>
+<h3><a href="#csv-points">Points from a CSV file</a></h3>
+<p>Rain gauges from a CSV with <code>lon</code> and <code>lat</code> columns (found by their names). Colored by kind and sized by rainfall, with names shown only from 1:1,000,000 in. Tiles are downloaded before the picture is drawn.</p>
+<div class="tags"><span>inspectCSV</span><span>readCSV</span><span>sizeField</span><span>minScale</span><span>fetchTiles</span></div>
+</div>
+<figure class="shot"><img src="assets/gauges.jpg" width="1400" height="933" loading="lazy" alt="Rain gauges near Manila on OpenStreetMap, colored by kind and sized by rainfall"><figcaption>What it draws</figcaption></figure>
+</div>
+<div class="code-wrap"><div class="code-bar"><span>csv-points.tsl</span><span>a program · 44 lines</span></div>
+<pre class="tsl">import cartography
+
+// Rain gauges from a CSV file (with lon and lat columns), colored by their
+// kind and sized by their yearly rainfall, saved as a picture over
+// OpenStreetMap and as a GeoJSON file.
+fn main() {
+    let text = readFile("gauges.csv") ?? ""
+    let info = cartography.inspectCSV(text)
+    print("{info.rows} rows; x = {info.xField}, y = {info.yField}; fields: {info.fields.joined(separator: ", ")}")
+
+    match cartography.readCSV(text, name: "Rain gauges") {
+        .failure(e) -&gt; print(e.message)
+        .ok(read) -&gt; {
+            var gauges = read
+            gauges.style = cartography.categorizedStyle(layer: gauges, field: "kind")
+            gauges.style.sizeField = "rain_mm"
+            gauges.style.sizeFrom = 6
+            gauges.style.sizeTo = 22
+            // Names only from 1:1,000,000 in.
+            gauges.labels = cartography.LabelStyle(enabled: true, field: "station", size: 10,
+                placement: .right, distance: 3, minScale: 1000000)
+
+            var m = cartography.Map()
+            m.add(cartography.openStreetMap())
+            m.add(gauges)
+            m.vp.resize(900, 600)
+            m.vp.smooth = false
+            m.fitAll()
+
+            // Tiles first, then the picture.
+            let _started = cartography.fetchTiles(m) { paths in
+                let ok = renderImage(path: "gauges.png", width: 900, height: 600, scale: 2) { g in
+                    m.draw(g)
+                    let _size = cartography.drawLegend(g, m, x: 12, y: 12)
+                    cartography.drawMapScaleBar(g, m, x: 16, y: 584)
+                }
+                print("gauges.png: {ok}")
+            }
+            if let e = cartography.writeLayer(gauges, "gauges.geojson") {
+                print(e.message)
+            }
+        }
+    }
+}</pre></div>
+</article>
+
+<h2 class="exgroup">Files and data</h2>
+
+<article class="program" id="convert">
+<div class="program-head">
+<div>
+<h3><a href="#convert">Converting files</a></h3>
+<p>A shapefile in UTM read with its attributes and system, described, and written as GeoJSON, KML, CSV and a GeoPackage.</p>
+<div class="tags"><span>readLayers</span><span>writeLayer</span><span>writeGeoPackage</span><span>extent</span></div>
+</div>
+</div>
+<div class="code-wrap"><div class="code-bar"><span>convert.tsl</span><span>a program · 29 lines</span></div>
+<pre class="tsl">import cartography
+
+// Reads a shapefile (in whatever system its .prj says) and writes it as
+// GeoJSON, KML, a GeoPackage and CSV, saying what it found.
+fn main() {
+    match cartography.readLayers("lots.shp") {
+        .failure(e) -&gt; print("lots.shp: {e.message}")
+        .ok(layers) -&gt; {
+            for layer in layers {
+                print("{layer.name}: {layer.featureCount()} features")
+                print("  fields: {layer.fieldNames().joined(separator: ", ")}")
+                let b = layer.extent()
+                print("  extent: {b.minX}, {b.minY} – {b.maxX}, {b.maxY}")
+            }
+            let lots = layers[0]
+            for path in ["lots.geojson", "lots.kml", "lots.csv"] {
+                if let e = cartography.writeLayer(lots, path) {
+                    print("{path}: {e.message}")
+                } else {
+                    print("wrote {path}")
+                }
+            }
+            // A GeoPackage can hold several layers.
+            if let e = cartography.writeGeoPackage(layers, "lots.gpkg") {
+                print("lots.gpkg: {e.message}")
+            }
+        }
+    }
+}</pre></div>
+<div class="out"><p class="label">What it prints</p><pre>lots: 3 features
+  fields: id, zone, area
+  extent: 495000.0, 1595000.0 – 535000.0, 1635000.0
+wrote lots.geojson
+wrote lots.kml
+wrote lots.csv</pre></div>
+</article>
+
+<article class="program" id="build-layer">
+<div class="program-head">
+<div>
+<h3><a href="#build-layer">A layer made in code</a></h3>
+<p>Survey points in UTM built feature by feature with <code>addFeature</code>, one missing a value. Printed as WKT and as GeoJSON (always in longitude and latitude), and saved as a shapefile and a GeoPackage.</p>
+<div class="tags"><span>newVectorLayer</span><span>addColumn</span><span>addFeature</span><span>Value</span><span>wkt</span><span>geoJSON</span></div>
+</div>
+</div>
+<div class="code-wrap"><div class="code-bar"><span>build-layer.tsl</span><span>a program · 33 lines</span></div>
+<pre class="tsl">import cartography
+import geodesy
+
+// A layer of survey points made in code, in UTM zone 51N, saved as a
+// shapefile and a GeoPackage, and printed as WKT and GeoJSON.
+fn main() {
+    let utm = geodesy.epsg(32651) ?? cartography.lonLat()
+    var pts = cartography.newVectorLayer(name: "Survey", geomKind: .point, crs: utm)
+    pts.addColumn(name: "id", kind: .int)
+    pts.addColumn(name: "label", kind: .text)
+    pts.addColumn(name: "elev", kind: .float)
+
+    pts.addFeature(cartography.pointGeometry(500120.0, 1615230.0),
+        values: [.num(value: 1), .text(value: "BM-1"), .num(value: 12.48)])
+    pts.addFeature(cartography.pointGeometry(500410.5, 1615602.2),
+        values: [.num(value: 2), .text(value: "BM-2"), .num(value: 14.02)])
+    pts.addFeature(cartography.pointGeometry(500733.1, 1615188.9),
+        values: [.num(value: 3), .text(value: "BM-3")])     // no elevation yet
+
+    for i in 0..pts.featureCount() {
+        let row = pts.row(i).map { v in v.display() }
+        print("{cartography.wkt(pts.geoms[i], decimals: 2)}  {row.joined(separator: " | ")}")
+    }
+
+    if let e = cartography.writeLayer(pts, "survey.shp") {
+        print(e.message)
+    }
+    if let e = cartography.writeLayer(pts, "survey.gpkg") {
+        print(e.message)
+    }
+    // GeoJSON is always in longitude and latitude.
+    print(cartography.geoJSON(pts, decimals: 6))
+}</pre></div>
+<div class="out"><p class="label">What it prints</p><pre>POINT (500120 1615230)  1 | BM-1 | 12.48
+POINT (500410.5 1615602.2)  2 | BM-2 | 14.02
+POINT (500733.1 1615188.9)  3 | BM-3 |
+{
+"type": "FeatureCollection",
+"name": "Survey",
+"features": [
+{"type":"Feature","properties":{"id":1,"label":"BM-1","elev":12.48},"geometry":{"type":"Point","coordinates":[123.001114,14.610353]}},
+…</pre></div>
+</article>
+
+<article class="program" id="raster-stats">
+<div class="program-head">
+<div>
+<h3><a href="#raster-stats">Numbers from a DEM</a></h3>
+<p>A DEM's statistics and histogram, a profile across it, the mean height in each zone of a GeoPackage, and its slope saved as an LZW GeoTIFF.</p>
+<div class="tags"><span>rasterStatistics</span><span>rasterHistogram</span><span>sampleRaster</span><span>zonalStatistics</span><span>slope</span><span>writeGeoTIFF</span></div>
+</div>
+</div>
+<div class="code-wrap"><div class="code-bar"><span>raster-stats.tsl</span><span>a program · 55 lines</span></div>
+<pre class="tsl">import cartography
+
+// Numbers from a DEM: its statistics, a histogram, a profile along a
+// line, the mean height in each zone of a GeoPackage, and its slope saved
+// as a GeoTIFF.
+fn main() {
+    let dem = match cartography.readRaster("dem.tif") {
+        .ok(layer) -&gt; layer
+        .failure(e) -&gt; {
+            print(e.message)
+            return
+        }
+    }
+    let r = dem.raster
+    let s = cartography.rasterStatistics(r)
+    print("{r.width} × {r.height} cells, {s.count} with a value")
+    print("height {cartography.formatNumber(s.min, decimals: 1)} to {cartography.formatNumber(s.max, decimals: 1)} m, mean {cartography.formatNumber(s.mean, decimals: 1)} m")
+
+    // Ten equal steps from the lowest to the highest.
+    let bins = cartography.rasterHistogram(r, bins: 10)
+    let step = (s.max - s.min) / 10.0
+    let most = bins.max() ?? 1
+    for i in 0..bins.count {
+        var bar = ""
+        for _ in 0..(bins[i] * 40 / most) {
+            bar += "#"
+        }
+        print("  {cartography.formatNumber(s.min + step * Float(i), decimals: 0)} m  {bar}")
+    }
+
+    // A profile across the raster, 50 points from west to east.
+    let b = r.box
+    var points: [Float] = []
+    for i in 0..50 {
+        points.append(b.minX + b.width() * Float(i) / 49.0)
+        points.append(b.centerY())
+    }
+    let profile = cartography.sampleRaster(r, points: points)
+    print("profile: {profile.map { z in cartography.formatNumber(z, decimals: 0) }.joined(separator: " ")}")
+
+    // The mean height in each zone (the zones must be in the DEM's system).
+    if let zones = cartography.readLayers("zones.gpkg").value() {
+        let z = zones[0]
+        let shapes = z.geoms.map { g in cartography.reprojected(g, from: z.crs, to: dem.crs) }
+        let stats = cartography.zonalStatistics(r, zones: shapes)
+        for i in 0..stats.count {
+            print("zone {i}: {stats[i].count} cells, mean {cartography.formatNumber(stats[i].mean, decimals: 1)} m")
+        }
+    }
+
+    let steep = cartography.slope(dem)
+    if let e = cartography.writeGeoTIFF(steep, "slope.tif", compression: "lzw") {
+        print(e.message)
+    }
+}</pre></div>
+<div class="out"><p class="label">What it prints</p><pre>60 × 45 cells, 2700 with a value
+height 351.6 to 594.5 m, mean 452.3 m
+  352 m  ######
+  376 m  #####################
+  400 m  ######################
+  424 m  ###################
+  449 m  ########################################
+  473 m  ######################
+  497 m  #########
+  522 m  #######
+  546 m  #####
+  570 m  ###
+profile: 390 395 400 405 412 427 437 446 457 478 489 499 508 516 526 529 529 …
+zone 0: 1350 cells, mean 441.3 m
+zone 1: 1350 cells, mean 463.3 m</pre></div>
+</article>
+
+    <p class="doc-foot">Every function used here is in the <a href="docs.html">documentation</a>. Map data in the pictures is from <a href="https://www.naturalearthdata.com">Natural Earth</a> (public domain); basemaps are © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors.</p>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>cartography · MIT licence · © 2026 <a href="https://syncster.dev" rel="author">Alexius Academia</a> · <a href="mailto:admin@syncster.dev">admin@syncster.dev</a> · <a href="https://syncster.dev">syncster.dev</a></span>
+    <nav>
+      <a href="https://github.com/alexiusacademia/cartography">GitHub</a>
+      <a href="https://tessel-lang.syncster.dev">Tessel</a>
+      <a href="https://tessel-packages.syncster.dev">Libraries</a>
+      <a href="https://geodesy-package.syncster.dev">geodesy</a>
+      <a href="https://viewport-package.syncster.dev">viewport</a>
+    </nav>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

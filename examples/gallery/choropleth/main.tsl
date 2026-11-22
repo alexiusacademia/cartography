@@ -1,0 +1,48 @@
+// cartography gallery: "choropleth", one of the programs on the website's
+// examples page. Check it with `tessel check examples/gallery/choropleth`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../../.."
+import geodesy
+
+fn millions(_ x: Float) -> String {
+    cartography.formatNumber(round(x / 100000.0) / 10.0, decimals: 1)
+}
+
+fn main() {
+    var layers: [cartography.Layer] = []
+    match cartography.readLayers("countries.geojson") {
+        .ok(read) -> { layers = read }
+        .failure(e) -> {
+            print(e.message)
+            return
+        }
+    }
+    var m = cartography.Map(crs: geodesy.epsg(8857) ?? cartography.lonLat(), background: .rgb(245, 245, 245))
+
+    // Five classes of population by natural breaks (Jenks), yellow to red,
+    // each labeled in millions.
+    var countries = layers[0]
+    countries.name = "Population"
+    countries.style = cartography.graduatedStyle(layer: countries, field: "POP_EST",
+        mode: .naturalBreaks, count: 5, ramp: "YlOrRd")
+    for i in 0..countries.style.classes.count {
+        let c = countries.style.classes[i]
+        countries.style.classes[i].label = "{millions(c.lower)} – {millions(c.upper)} M"
+        countries.style.classes[i].symbol.stroke = cartography.rgb(120, 120, 120)
+        countries.style.classes[i].symbol.strokeWidth = 0.4
+    }
+    m.add(countries)
+
+    m.vp.resize(1000, 520)
+    m.vp.smooth = false
+    m.fitAll()
+    let ok = renderImage(path: "population.png", width: 1000, height: 520, scale: 2) { g in
+        m.draw(g)
+        let _size = cartography.drawLegend(g, m, x: 12, y: 12)
+        cartography.drawMapScaleBar(g, m, x: 16, y: 504)
+    }
+    print("population.png: {ok}")
+}

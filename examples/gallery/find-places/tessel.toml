@@ -1,0 +1,7 @@
+# cartography gallery example "find-places", shown on examples.html.
+# `tessel run examples/gallery/find-places` from the library folder.
+tessel = "0.24.0"
+
+[dependencies]
+geodesy = "0.2"
+viewport = "0.1"

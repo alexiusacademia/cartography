@@ -1,0 +1,39 @@
+// cartography gallery: "build-layer", one of the programs on the website's
+// examples page. Check it with `tessel check examples/gallery/build-layer`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../../.."
+import geodesy
+
+// A layer of survey points made in code, in UTM zone 51N, saved as a
+// shapefile and a GeoPackage, and printed as WKT and GeoJSON.
+fn main() {
+    let utm = geodesy.epsg(32651) ?? cartography.lonLat()
+    var pts = cartography.newVectorLayer(name: "Survey", geomKind: .point, crs: utm)
+    pts.addColumn(name: "id", kind: .int)
+    pts.addColumn(name: "label", kind: .text)
+    pts.addColumn(name: "elev", kind: .float)
+
+    pts.addFeature(cartography.pointGeometry(500120.0, 1615230.0),
+        values: [.num(value: 1), .text(value: "BM-1"), .num(value: 12.48)])
+    pts.addFeature(cartography.pointGeometry(500410.5, 1615602.2),
+        values: [.num(value: 2), .text(value: "BM-2"), .num(value: 14.02)])
+    pts.addFeature(cartography.pointGeometry(500733.1, 1615188.9),
+        values: [.num(value: 3), .text(value: "BM-3")])     // no elevation yet
+
+    for i in 0..pts.featureCount() {
+        let row = pts.row(i).map { v in v.display() }
+        print("{cartography.wkt(pts.geoms[i], decimals: 2)}  {row.joined(separator: " | ")}")
+    }
+
+    if let e = cartography.writeLayer(pts, "survey.shp") {
+        print(e.message)
+    }
+    if let e = cartography.writeLayer(pts, "survey.gpkg") {
+        print(e.message)
+    }
+    // GeoJSON is always in longitude and latitude.
+    print(cartography.geoJSON(pts, decimals: 6))
+}

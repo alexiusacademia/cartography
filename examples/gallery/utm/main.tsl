@@ -1,0 +1,41 @@
+// cartography gallery: "utm", one of the programs on the website's
+// examples page. Check it with `tessel check examples/gallery/utm`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../../.."
+import geodesy
+
+// A map drawn in UTM zone 51N rather than Web Mercator: OpenStreetMap's
+// tiles are warped to fit, the scale is measured on the ground, and the
+// mouse shows eastings and northings.
+fn startingMap() -> cartography.Map {
+    var m = cartography.Map(crs: geodesy.epsg(32651) ?? cartography.webMercator())
+    m.add(cartography.openStreetMap())
+    m.credit = "UTM 51N"
+    m.centerOn(lon: 121.0, lat: 14.6, scale: 50000)
+    m
+}
+
+app Utm(title: "UTM", width: 900, height: 640) {
+    state m = startingMap()
+    state xy = ""
+
+    VStack(spacing: 0) {
+        cartography.MapView(map: m, imperial: false, keys: true, onMouse: { lon, lat in
+            let p = cartography.transformCoords(from: cartography.lonLat(), to: m.crs, coords: [lon, lat])
+            xy = "E {cartography.groupedNumber(p[0])}  N {cartography.groupedNumber(p[1])}"
+        })
+        HStack {
+            Button("UTM 51N") { m.setCrs(geodesy.epsg(32651) ?? cartography.webMercator()) }
+            Button("Web Mercator") { m.setCrs(cartography.webMercator()) }
+            Button("Degrees") { m.setCrs(cartography.lonLat()) }
+            Spacer()
+            Text(xy)
+            Text("1:{cartography.groupedNumber(m.scaleDenominator())}").color(.secondary)
+        }
+        .font(size: 12)
+        .padding(8)
+    }
+}

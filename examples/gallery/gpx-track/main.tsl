@@ -1,0 +1,59 @@
+// cartography gallery: "gpx-track", one of the programs on the website's
+// examples page. Check it with `tessel check examples/gallery/gpx-track`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../../.."
+
+// A GPX track over a choice of basemaps, its direction shown by arrows
+// along it, with the waypoints labeled.
+fn startingMap() -> cartography.Map {
+    var m = cartography.Map()
+    m.add(cartography.tileLayer(cartography.tileSource(named: "OpenTopoMap") ?? cartography.tileSources()[0]))
+    match cartography.readLayers("hike.gpx") {
+        .failure(e) -> print(e.message)
+        .ok(layers) -> {
+            for read in layers {
+                var layer = read
+                if layer.geomKind == .line {
+                    layer.style.symbol = cartography.Symbol(stroke: cartography.rgb(200, 30, 90), strokeWidth: 3,
+                        size: 7, marker: .arrow, markerLine: true, markerInterval: 60, casing: true)
+                } else {
+                    layer.style.symbol = cartography.Symbol(fill: cartography.rgb(255, 200, 0), size: 10, marker: .triangle)
+                    layer.labels = cartography.LabelStyle(enabled: true, field: "name", placement: .right, distance: 4)
+                }
+                m.add(layer)
+            }
+        }
+    }
+    m
+}
+
+app Hike(title: "Hike", width: 1000, height: 700) {
+    state m = startingMap()
+    state basemap = "OpenTopoMap"
+    state place = ""
+
+    VStack(spacing: 0) {
+        HStack {
+            Picker(selection: basemap, style: .menu) {
+                Text("OpenTopoMap").tag("OpenTopoMap")
+                Text("OpenStreetMap").tag("OpenStreetMap")
+                Text("Esri World Imagery").tag("Esri World Imagery")
+            }
+            Button("Change basemap") {
+                if let s = cartography.tileSource(named: basemap) {
+                    m.remove(at: 0)
+                    m.insert(cartography.tileLayer(s), at: 0)
+                }
+            }
+            Spacer()
+            Text(place).color(.secondary)
+        }
+        .padding(8)
+        cartography.MapView(map: m, northArrow: true, legend: true, onMouse: { lon, lat in
+            place = "{lat.formatted(decimals: 5)}, {lon.formatted(decimals: 5)}"
+        })
+    }
+}

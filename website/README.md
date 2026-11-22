@@ -9,8 +9,12 @@ deploys this folder by itself whenever `main` is pushed to GitHub.
 
 ```
 index.html             # the page
+docs.html              # every type and function
+examples.html          # whole programs, each checked with `tessel check`
+site.js                # code colors, copy buttons, the docs' filter and side menu
 styles.css             # the other libraries' design, in green
 assets/*.png           # the pictures `tessel run examples/pictures` draws (copied from ../docs)
+assets/gauges.jpg      # the picture of the CSV example on examples.html
 assets/share.png       # world.png cropped to 1981 x 1040 and scaled to 1200 x 630
 assets/favicon.svg
 netlify.toml           # no build; HTML isn't cached

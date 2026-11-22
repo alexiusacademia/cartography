@@ -1,0 +1,22 @@
+# The exact versions of the libraries this project uses, worked out by
+# Tessel from tessel.toml. Commit it, so every build uses the same ones.
+
+format = 1
+
+[[package]]
+name = "geodesy"
+version = "0.2.0"
+source = "index"
+repository = "https://github.com/alexiusacademia/geodesy"
+tag = "v0.2.0"
+commit = "01cb19eb391b86af63c57331e26f0e5132f15512"
+checksum = "sha256:22c995437c18beaf8b202b6c9ab4e70059227bae3d00cff2603e3205f3849ad1"
+
+[[package]]
+name = "viewport"
+version = "0.1.0"
+source = "index"
+repository = "https://github.com/alexiusacademia/viewport"
+tag = "v0.1.0"
+commit = "49f72d2d2be7970f7f8dc453628b24b03074a6d2"
+checksum = "sha256:4de4e68a30c41588dbe29d2a0b8f9e482f7672dc55d777e40b4d59459182fb31"

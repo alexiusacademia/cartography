@@ -1,0 +1,61 @@
+// cartography gallery: "raster-stats", one of the programs on the website's
+// examples page. Check it with `tessel check examples/gallery/raster-stats`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../../.."
+
+// Numbers from a DEM: its statistics, a histogram, a profile along a
+// line, the mean height in each zone of a GeoPackage, and its slope saved
+// as a GeoTIFF.
+fn main() {
+    let dem = match cartography.readRaster("dem.tif") {
+        .ok(layer) -> layer
+        .failure(e) -> {
+            print(e.message)
+            return
+        }
+    }
+    let r = dem.raster
+    let s = cartography.rasterStatistics(r)
+    print("{r.width} × {r.height} cells, {s.count} with a value")
+    print("height {cartography.formatNumber(s.min, decimals: 1)} to {cartography.formatNumber(s.max, decimals: 1)} m, mean {cartography.formatNumber(s.mean, decimals: 1)} m")
+
+    // Ten equal steps from the lowest to the highest.
+    let bins = cartography.rasterHistogram(r, bins: 10)
+    let step = (s.max - s.min) / 10.0
+    let most = bins.max() ?? 1
+    for i in 0..bins.count {
+        var bar = ""
+        for _ in 0..(bins[i] * 40 / most) {
+            bar += "#"
+        }
+        print("  {cartography.formatNumber(s.min + step * Float(i), decimals: 0)} m  {bar}")
+    }
+
+    // A profile across the raster, 50 points from west to east.
+    let b = r.box
+    var points: [Float] = []
+    for i in 0..50 {
+        points.append(b.minX + b.width() * Float(i) / 49.0)
+        points.append(b.centerY())
+    }
+    let profile = cartography.sampleRaster(r, points: points)
+    print("profile: {profile.map { z in cartography.formatNumber(z, decimals: 0) }.joined(separator: " ")}")
+
+    // The mean height in each zone (the zones must be in the DEM's system).
+    if let zones = cartography.readLayers("zones.gpkg").value() {
+        let z = zones[0]
+        let shapes = z.geoms.map { g in cartography.reprojected(g, from: z.crs, to: dem.crs) }
+        let stats = cartography.zonalStatistics(r, zones: shapes)
+        for i in 0..stats.count {
+            print("zone {i}: {stats[i].count} cells, mean {cartography.formatNumber(stats[i].mean, decimals: 1)} m")
+        }
+    }
+
+    let steep = cartography.slope(dem)
+    if let e = cartography.writeGeoTIFF(steep, "slope.tif", compression: "lzw") {
+        print(e.message)
+    }
+}

@@ -221,6 +221,8 @@ coordinates and shapes between systems.
   rasterio numpy contourpy matplotlib`.
 - `tessel run examples` opens a small app.
 - `tessel run examples/pictures` draws the pictures above.
+- `examples/gallery/` holds the twelve programs of the website's examples
+  page, one folder each (`tessel check examples/gallery/world`).
 
 ## License
 

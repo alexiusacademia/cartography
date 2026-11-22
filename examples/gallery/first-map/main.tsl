@@ -1,0 +1,31 @@
+// cartography gallery: "first-map", one of the programs on the website's
+// examples page. Check it with `tessel check examples/gallery/first-map`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../../.."
+
+// A layer of points made in code: two towns, as red stars with their names.
+fn towns() -> cartography.Layer {
+    var t = cartography.Layer(name: "Towns", geomKind: .point)
+    t.geoms = [cartography.pointGeometry(121.0, 14.6), cartography.pointGeometry(120.6, 16.4)]
+    t.columns = [cartography.textColumn(name: "name", values: ["Manila", "Baguio"])]
+    t.style.symbol = cartography.Symbol(fill: cartography.rgb(220, 40, 40), size: 12, marker: .star)
+    t.labels = cartography.LabelStyle(enabled: true, field: "name", bold: true)
+    t
+}
+
+fn startingMap() -> cartography.Map {
+    var m = cartography.Map()                  // Web Mercator
+    m.add(cartography.openStreetMap())
+    m.add(towns())                             // also places the map on them
+    m.centerOn(lon: 121.0, lat: 15.5, scale: 2000000)
+    m
+}
+
+app FirstMap(title: "First map", width: 800, height: 600) {
+    state m = startingMap()
+
+    cartography.MapView(map: m, northArrow: true)
+}

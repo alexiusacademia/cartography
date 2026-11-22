@@ -1,0 +1,52 @@
+// cartography gallery: "terrain", one of the programs on the website's
+// examples page. Check it with `tessel check examples/gallery/terrain`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../../.."
+
+fn main() {
+    var m = cartography.Map()
+    match cartography.readRaster("dem.tif") {
+        .failure(e) -> print(e.message)
+        .ok(read) -> {
+            var dem = read
+            dem.name = "Elevation (m)"
+
+            // Shaded relief underneath, with the land drawn twice as tall.
+            var hills = cartography.hillshade(dem, exaggeration: 2.0)
+            hills.rasterStyle.look = .gray
+            hills.rasterStyle.low = 0
+            hills.rasterStyle.high = 255
+            m.add(hills)
+
+            // The heights in color, three quarters opaque so the hills show.
+            dem.rasterStyle = cartography.rampRasterStyle(dem, ramp: "Terrain")
+            dem.opacity = 0.75
+            m.add(dem)
+
+            // Contours every 25 m, labeled along their lines.
+            var lines = cartography.contours(dem, interval: 25)
+            lines.style.symbol = cartography.Symbol(stroke: cartography.Rgba(r: 60, g: 40, b: 20, a: 0.6), strokeWidth: 0.8)
+            lines.labels = cartography.LabelStyle(enabled: true, field: "elev", size: 9,
+                color: cartography.rgb(80, 50, 20), curved: true)
+            m.add(lines)
+
+            m.vp.resize(700, 520)
+            m.vp.smooth = false
+            m.fitAll()
+            let ok = renderImage(path: "terrain.png", width: 700, height: 520, scale: 2) { g in
+                m.draw(g)
+                let _size = cartography.drawLegend(g, m, x: 12, y: 12)
+                cartography.drawMapScaleBar(g, m, x: 16, y: 504)
+            }
+            print("terrain.png: {ok}")
+
+            // The contours as a GeoPackage, for QGIS.
+            if let e = cartography.writeLayer(lines, "contours.gpkg") {
+                print(e.message)
+            }
+        }
+    }
+}

@@ -1,0 +1,86 @@
+// cartography gallery: "own-canvas", one of the programs on the website's
+// examples page. Check it with `tessel check examples/gallery/own-canvas`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../../.."
+import viewport
+
+// A map on a Canvas of your own rather than MapView: it pans and zooms
+// through the map's viewport, downloads the tiles each new view needs, and
+// counts the features inside a box drawn with Shift and a drag.
+fn startingMap() -> cartography.Map {
+    var m = cartography.Map()
+    m.add(cartography.openStreetMap())
+    if let layers = cartography.readLayers("buildings.gpkg").value() {
+        for layer in layers {
+            m.add(layer)
+        }
+    }
+    m.vp.smooth = false                     // no animation, so no timer needed
+    m
+}
+
+app OwnCanvas(title: "Own canvas", width: 900, height: 640) {
+    state m = startingMap()
+    state redraw = 0
+    state status = "Drag to pan, wheel to zoom"
+
+    VStack(spacing: 0) {
+        Canvas { g in
+            let _r = redraw                 // draw again when a tile comes in
+            m.draw(g)
+            viewport.drawZoomBox(g, m.vp)
+            cartography.drawMapScaleBar(g, m, x: 14, y: g.height - 22)
+            cartography.drawNorthArrow(g, m, x: g.width - 30, y: 34)
+            let _size = cartography.drawLegend(g, m, x: 10, y: 10, maxEntries: 12)
+        }
+        .onResize { w, h in
+            m.vp.resize(w, h)
+            fetch()
+        }
+        .onPointer { e in
+            if m.vp.handle(e) {
+                fetch()
+            }
+            if e.kind == .up && e.button == .left && e.clicks == 1 {
+                if let h = m.featureAt(e.x, e.y) {
+                    m.select(layer: h.layer, rows: [h.row])
+                    status = "{m.layers[h.layer].name}, row {h.row}"
+                } else {
+                    m.clearSelection()
+                }
+            }
+        }
+        HStack {
+            Text(status)
+            Spacer()
+            Button("Count in view") { countInView() }
+        }
+        .padding(8)
+    }
+
+    // Starts downloading the tiles the view needs and isn't showing yet.
+    fn fetch() {
+        let started = cartography.fetchTiles(m, userAgent: "OwnCanvas/1.0", arrived: { path, ok in
+            m.loading.remove(path)
+            redraw += 1
+        }) { paths in
+            if cartography.warpTileLayers(m) {     // only for maps not in Web Mercator
+                redraw += 1
+            }
+        }
+        for path in started {
+            m.loading.insert(path)
+        }
+    }
+
+    // How many features of the top layer are in the view.
+    fn countInView() {
+        let top = m.layers.count - 1
+        let rows = m.featuresIn(layer: top, 0, 0, m.vp.width, m.vp.height)
+        m.select(layer: top, rows: rows)
+        status = "{rows.count} of {m.layers[top].featureCount()} in view"
+    }
+}

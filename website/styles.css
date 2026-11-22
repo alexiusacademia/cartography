@@ -255,3 +255,81 @@ footer a:hover { color: var(--ink); }
 .fcard p { margin: 0 0 12px; color: var(--muted); font-size: 15px; }
 .fcard pre { font-size: 13px; }
 @media (max-width: 900px) { .features2 { grid-template-columns: minmax(0, 1fr); } }
+
+/* Docs and examples pages: a side menu and a column of text */
+.top nav a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+.docs-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 48px; align-items: start; padding-top: 32px; padding-bottom: 64px; }
+.sidenav {
+  position: sticky; top: 76px; max-height: calc(100vh - 92px); overflow-y: auto;
+  font-size: 14.5px; padding: 4px 4px 24px 0; overscroll-behavior: contain;
+}
+.sidenav ul { list-style: none; margin: 0 0 6px; padding: 0; }
+.sidenav li a { display: block; padding: 4px 10px; border-radius: 7px; color: var(--muted); border-left: 2px solid transparent; }
+.sidenav li a:hover { color: var(--ink); text-decoration: none; background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.sidenav li a.here { color: var(--accent); border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); font-weight: 600; border-radius: 0 7px 7px 0; }
+.navgroup { margin: 18px 0 4px 10px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.search { position: relative; display: block; }
+.search input {
+  width: 100%; font: 14px/1.2 "Bricolage Grotesque", system-ui, sans-serif; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 9px; padding: 9px 30px 9px 11px;
+}
+.search input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
+.search kbd { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); font: 500 11px/1 "IBM Plex Mono", monospace; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.doc-body { min-width: 0; }
+.doc-head { margin-bottom: 12px; }
+.doc-head h1 { font-size: clamp(32px, 4.4vw, 46px); }
+.doc-head .lede { font-size: 18px; margin-bottom: 18px; }
+.doc-head .install { margin: 0; }
+.howto { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; font-size: 15px; color: var(--muted); }
+.howto p { margin: 6px 0; }
+.howto b { color: var(--ink); }
+
+section.doc { padding: 40px 0 8px; border-top: 1px solid var(--line); }
+section.doc + section.doc { border-top: 1px solid var(--line); }
+section.doc > h2 { font-size: 28px; margin-bottom: 14px; }
+section.doc > p { max-width: 46em; }
+section.doc h3 { font-size: 17px; margin: 30px 0 10px; }
+section.doc > pre.tsl, section.doc > .table, section.doc > .install { margin: 14px 0 22px; }
+.steps { padding-left: 22px; max-width: 46em; }
+.steps li { margin: 4px 0; }
+
+.api { margin: 18px 0 24px; scroll-margin-top: 76px; }
+.api:target .sig { outline: 2px solid var(--accent); }
+pre.sig { font-size: 13px; padding: 11px 14px; white-space: pre-wrap; word-break: break-word; }
+.api .desc { padding: 10px 2px 0 14px; border-left: 2px solid var(--line); margin-left: 8px; }
+.api .desc > p:first-child { margin-top: 0; }
+.api .desc ul { margin: 6px 0; padding-left: 20px; }
+.api .desc .table { margin-top: 12px; }
+.methods td:first-child, .api .table td:first-child { white-space: normal; min-width: 12em; }
+.api .table td:nth-child(2) { white-space: nowrap; }
+.api .table td:nth-child(2) code { background: none; padding: 0; color: var(--muted); font-size: 13px; }
+.no-match { color: var(--muted); padding: 24px 0; }
+body.filtering section.doc > p, body.filtering section.doc > pre, body.filtering section.doc > .steps, body.filtering section.doc > .install, body.filtering .doc-head { display: none; }
+.doc-foot { margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 15px; }
+
+/* Examples */
+.exgroup { font-size: 26px; margin: 44px 0 6px; padding-top: 28px; border-top: 1px solid var(--line); }
+.program { scroll-margin-top: 76px; margin: 20px 0 36px; }
+.program-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; align-items: start; margin-bottom: 14px; }
+.program-head:has(> :only-child) { grid-template-columns: minmax(0, 1fr); }
+.program h3 { font-size: 20px; margin: 0 0 6px; }
+.program h3 a { color: var(--ink); }
+.program-head p { margin: 0 0 10px; color: var(--muted); max-width: 42em; }
+.program .shot figcaption { font-size: 12.5px; color: var(--muted); padding: 7px 12px; border-top: 1px solid var(--line); }
+.code-wrap { position: relative; border-radius: 10px; overflow: hidden; background: var(--code-bg); }
+.code-bar { display: flex; justify-content: space-between; gap: 12px; padding: 9px 86px 9px 18px; font: 500 12.5px/1.2 "IBM Plex Mono", monospace; color: var(--code-com); border-bottom: 1px solid #ffffff14; }
+.code-wrap pre { border-radius: 0; max-height: 560px; overflow: auto; }
+.code-copy { position: absolute; top: 5px; right: 8px; z-index: 1; }
+.out pre { font-size: 12.5px; white-space: pre; }
+
+@media (max-width: 900px) {
+  .docs-layout { grid-template-columns: minmax(0, 1fr); gap: 0; padding-top: 16px; }
+  .sidenav { position: static; max-height: none; border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 8px; }
+  .sidenav ul { display: flex; flex-wrap: wrap; gap: 2px 4px; }
+  .sidenav li a { padding: 3px 8px; border-left: 0; }
+  .navgroup { margin: 10px 0 2px 8px; }
+  .program-head { grid-template-columns: minmax(0, 1fr); }
+  .code-bar span:last-child { display: none; }
+}

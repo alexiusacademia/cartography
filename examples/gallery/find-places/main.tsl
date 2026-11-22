@@ -1,0 +1,57 @@
+// cartography gallery: "find-places", one of the programs on the website's
+// examples page. Check it with `tessel check examples/gallery/find-places`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../../.."
+
+fn startingMap() -> cartography.Map {
+    var m = cartography.Map()
+    m.add(cartography.tileLayer(cartography.tileSource(named: "CARTO Positron") ?? cartography.tileSources()[0]))
+    if let layers = cartography.readLayers("places.geojson").value() {
+        var places = layers[0]
+        places.style.symbol = cartography.Symbol(fill: cartography.rgb(21, 128, 61), size: 7)
+        places.labels = cartography.LabelStyle(enabled: true, field: "NAME", size: 10, background: true)
+        m.add(places)
+    }
+    m
+}
+
+app FindPlaces(title: "Find places", width: 900, height: 620) {
+    state m = startingMap()
+    state query = ""
+    state found = ""
+
+    VStack(spacing: 0) {
+        HStack {
+            TextField("Find a place", text: query).onSubmit { search() }
+            Button("Find") { search() }
+            Button("Show all") {
+                query = ""
+                search()
+            }
+            Text(found).color(.secondary)
+        }
+        .padding(8)
+        cartography.MapView(map: m) { hit in
+            if let h = hit {
+                found = m.attributes(h).filter { p in p.0 == "NAME" || p.0 == "ADM0NAME" }
+                    .map { p in p.1 }.joined(separator: ", ")
+            }
+        }
+    }
+
+    // Hides the places whose names don't have the query in them, then
+    // shows the ones that are left.
+    fn search() {
+        if let i = m.layerIndex(named: "places") {
+            let q = query.trim().lowercase()
+            let names = m.layers[i].columnIndex("NAME") ?? 0
+            m.layers[i].hidden = m.layers[i].columns[names].texts.map { n in q != "" && !n.lowercase().contains(q) }
+            m.refresh(i)
+            found = "{m.layers[i].shownCount()} places"
+            m.fitLayer(i)
+        }
+    }
+}

@@ -1,0 +1,1311 @@
+<!doctype html>
+<!--
+  cartography's documentation: https://cartography-package.syncster.dev/docs.html
+  Author: Alexius Academia
+  Date: 2026-11-22
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="author" content="Alexius Academia">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Documentation · cartography</title>
+  <meta name="description" content="The whole of cartography, the Tessel map library: Map and MapView, layers, geometry, styles and labels, file formats, rasters and terrain, basemap tiles and coordinate systems.">
+  <meta name="theme-color" content="#15803d">
+  <link rel="canonical" href="https://cartography-package.syncster.dev/docs.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="cartography">
+  <meta property="og:title" content="Documentation · cartography">
+  <meta property="og:description" content="Every type and function of cartography, the Tessel map library, with what it does.">
+  <meta property="og:url" content="https://cartography-package.syncster.dev/docs.html">
+  <meta property="og:image" content="https://cartography-package.syncster.dev/assets/share.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#15803d"/><path d="M6 9 L12 7 L20 10 L26 8 V23 L20 25 L12 22 L6 24 Z" fill="none" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 7 V22 M20 10 V25" stroke="#fff" stroke-width="1.4"/></svg>
+      cartography <small>for Tessel</small>
+    </a>
+    <nav>
+      <a href="docs.html" aria-current="page">Docs</a>
+      <a href="examples.html">Examples</a>
+      <a href="https://github.com/alexiusacademia/cartography">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap docs-layout">
+  <aside class="sidenav">
+    <label class="search">
+      <span class="visually-hidden">Filter the reference</span>
+      <input id="filter" type="search" placeholder="Filter: readCSV, label, tile…" autocomplete="off" spellcheck="false">
+      <kbd>/</kbd>
+    </label>
+<p class="navgroup">Guide</p><ul>
+<li><a href="#start">Getting started</a></li>
+</ul>
+<p class="navgroup">Maps</p><ul>
+<li><a href="#map">The Map</a></li>
+<li><a href="#mapview">MapView</a></li>
+<li><a href="#canvas">Your own Canvas</a></li>
+<li><a href="#decor">Legend, scale bar, north arrow</a></li>
+</ul>
+<p class="navgroup">Data</p><ul>
+<li><a href="#layers">Layers</a></li>
+<li><a href="#geometry">Geometry</a></li>
+<li><a href="#tables">Attributes</a></li>
+</ul>
+<p class="navgroup">Drawing</p><ul>
+<li><a href="#styles">Symbols and styles</a></li>
+<li><a href="#labels">Labels</a></li>
+</ul>
+<p class="navgroup">Files</p><ul>
+<li><a href="#files">Reading and writing files</a></li>
+</ul>
+<p class="navgroup">Rasters</p><ul>
+<li><a href="#rasters">Rasters</a></li>
+<li><a href="#terrain">Terrain</a></li>
+<li><a href="#raster-values">Raster values</a></li>
+</ul>
+<p class="navgroup">Basemaps</p><ul>
+<li><a href="#tiles">Basemap tiles</a></li>
+<li><a href="#tile-fetch">Downloading tiles</a></li>
+<li><a href="#tile-math">Tile numbers</a></li>
+</ul>
+<p class="navgroup">Systems</p><ul>
+<li><a href="#crs">Coordinate systems</a></li>
+</ul>
+  </aside>
+
+  <div class="doc-body">
+    <header class="doc-head">
+      <p class="eyebrow">Documentation · version 0.1</p>
+      <h1>cartography</h1>
+      <p class="lede">Every type and function in the library, with what it does. Names are under the <code>cartography.</code> prefix. For whole programs, see the <a href="examples.html">examples</a>.</p>
+    </header>
+    <p id="no-match" class="no-match" hidden>Nothing in the reference matches that.</p>
+
+<section class="doc" id="start">
+<h2>Getting started</h2>
+<p>cartography is a Tessel library for maps. Add it to a project:</p>
+<div class="install"><code>tessel add cartography</code><button class="copy" type="button" data-copy="tessel add cartography">Copy</button></div>
+<p>It brings in <a href="https://geodesy-package.syncster.dev">geodesy</a> (coordinate systems) and <a href="https://viewport-package.syncster.dev">viewport</a> (panning and zooming). To call them yourself, as in <code>geodesy.epsg(32651)</code>, add them to your project too and import them:</p>
+<pre class="tsl">import cartography
+import geodesy     // only to name coordinate systems yourself
+import viewport    // only to draw on a Canvas of your own</pre>
+<p>Everything is under the <code>cartography.</code> prefix. A program usually goes like this:</p>
+<ol class="steps"><li>Make a <a href="#Map"><code>Map</code></a>, in Web Mercator unless you give it another <code>crs</code>.</li><li>Add layers: a basemap (<a href="#openStreetMap"><code>openStreetMap()</code></a>), layers read from files (<a href="#readLayers"><code>readLayers</code></a>, <a href="#readRaster"><code>readRaster</code></a>), or layers made in code.</li><li>Give layers a <a href="#styles">style</a> and <a href="#labels">labels</a>.</li><li>Show it in a <a href="#MapView"><code>MapView</code></a>, draw it on <a href="#canvas">your own Canvas</a>, or save it as a picture with <a href="#map-methods"><code>savePicture</code></a> or <code>renderImage</code>.</li></ol>
+<pre class="tsl">import cartography
+
+fn startingMap() -&gt; cartography.Map {
+    var m = cartography.Map()
+    m.add(cartography.openStreetMap())
+    if let layers = cartography.readLayers("parcels.gpkg").value() {
+        for layer in layers {
+            m.add(layer)          // reprojected into the map's system
+        }
+    }
+    m
+}
+
+app Parcels(title: "Parcels", width: 900, height: 600) {
+    state m = startingMap()
+    cartography.MapView(map: m, legend: true)
+}</pre>
+<p>A <code>Map</code> and its layers are plain values. Change a layer through <code>m.layers[i]</code> and call <code>m.refresh(i)</code> afterwards, so the map works out its classes, labels and drawing again.</p>
+<p>There are worked programs for every part of the library on the <a href="examples.html">examples page</a>.</p>
+</section>
+
+<section class="doc" id="map">
+<h2>The Map</h2>
+<p>A <code>Map</code> holds its layers, the coordinate system it's drawn in and a viewport saying which part shows.</p>
+<div class="api" id="Map">
+<pre class="tsl sig">public struct Map</pre>
+<div class="desc">The whole of a map.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>layers</code></td><td><code>[Layer]</code></td><td>From the bottom up: <code>layers[0]</code> is drawn first, under the others. Default <code>[]</code>.</td></tr>
+<tr><td><code>crs</code></td><td><code>geodesy.Crs</code></td><td>The system the map is drawn in. Layers in other systems are reprojected into it. Change it with <code>setCrs</code>. Default <code>webMercator()</code>.</td></tr>
+<tr><td><code>vp</code></td><td><code>viewport.Viewport</code></td><td>Where the map shows on its Canvas, in map coordinates (y upwards). <code>vp.scale</code> is points per map unit. It pans, zooms, turns and can move smoothly (<code>vp.smooth</code>).</td></tr>
+<tr><td><code>background</code></td><td><code>Color</code></td><td>What shows where no layer covers the map. Default <code>.white</code>.</td></tr>
+<tr><td><code>tileFolder</code></td><td><code>String</code></td><td>Where downloaded tiles are kept ("": a folder <code>cartography-tiles</code> in the temporary folder).</td></tr>
+<tr><td><code>version</code></td><td><code>Int</code></td><td>Grows by one at every change to the layers, their styles or the map's system.</td></tr>
+<tr><td><code>loading</code></td><td><code>Set&amp;lt;String&amp;gt;</code></td><td>The tile files asked for and not yet in; see <a href="#fetchTiles"><code>fetchTiles</code></a>.</td></tr>
+<tr><td><code>credit</code></td><td><code>String</code></td><td>Text in the bottom right corner, besides the tile layers' attributions.</td></tr>
+</table></div>
+</div></div>
+<div class="api" id="Hit">
+<pre class="tsl sig">public struct Hit</pre>
+<div class="desc">A feature found on the map: the place of its layer in <code>Map.layers</code> and its row in that layer.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>layer</code></td><td><code>Int</code></td><td>Index into <code>Map.layers</code>.</td></tr>
+<tr><td><code>row</code></td><td><code>Int</code></td><td>The feature's row in that layer.</td></tr>
+</table></div>
+</div></div>
+<h3 id="map-methods">Methods</h3>
+<p>Layers</p>
+<div class="table methods"><table><tr><th>Method</th><th>Does</th></tr>
+<tr><td><code>add(_ layer: Layer)</code></td><td>Adds a layer on top, reprojected into the map's system. The first layer with features also places the map on them.</td></tr>
+<tr><td><code>insert(_ layer: Layer, at: Int)</code></td><td>Inserts a layer at <code>at</code> (0: at the bottom).</td></tr>
+<tr><td><code>remove(at: Int)</code></td><td>Takes a layer off the map.</td></tr>
+<tr><td><code>move(from: Int, to: Int)</code></td><td>Moves a layer from one place to another (0: the bottom).</td></tr>
+<tr><td><code>layerIndex(named: String) -&gt; Int?</code></td><td>The place of the first layer called <code>name</code>, or nil.</td></tr>
+<tr><td><code>refresh(_ i: Int)</code></td><td>Works a layer out again for drawing: reprojects its shapes and classes its features, or draws its raster again. Call it after changing a layer's shapes, values, style, labels or system.</td></tr>
+<tr><td><code>refreshAll()</code></td><td><code>refresh</code> for every layer.</td></tr>
+<tr><td><code>setCrs(_ to: geodesy.Crs)</code></td><td>Draws the map in another system, keeping the same place in the middle. Tiles are warped to fit.</td></tr>
+</table></div>
+<p>Where the map looks</p>
+<div class="table methods"><table><tr><th>Method</th><th>Does</th></tr>
+<tr><td><code>fit(_ b: Box)</code></td><td>Shows all of a box of the map (in the map's system).</td></tr>
+<tr><td><code>fitAll()</code></td><td>Shows every layer.</td></tr>
+<tr><td><code>fitLayer(_ i: Int)</code></td><td>Shows one layer.</td></tr>
+<tr><td><code>centerOn(lon: Float, lat: Float, scale: Float = 0.0)</code></td><td>Puts a place in the middle, at a scale of 1:<code>scale</code> if it's given.</td></tr>
+<tr><td><code>layerExtent(_ i: Int) -&gt; Box</code></td><td>The box around a layer as the map draws it.</td></tr>
+<tr><td><code>extent() -&gt; Box</code></td><td>The box around every layer with features or a raster.</td></tr>
+<tr><td><code>visible() -&gt; Box</code></td><td>The part of the map that shows (in the map's system).</td></tr>
+<tr><td><code>scaleDenominator() -&gt; Float</code></td><td>The N of the scale 1:N, for 96 points to the inch, measured on the ground at the middle of the map.</td></tr>
+<tr><td><code>setScaleDenominator(_ n: Float)</code></td><td>Zooms to 1:N about the middle of the map.</td></tr>
+<tr><td><code>metersOnGround(_ x: Float, _ y: Float) -&gt; Float</code></td><td>How many meters on the ground one map unit covers at a map point (from a short geodesic).</td></tr>
+<tr><td><code>pointsPerUnitFor(_ n: Float, lat: Float) -&gt; Float</code></td><td>Points per map unit for a scale of 1:N at latitude <code>lat</code>.</td></tr>
+</table></div>
+<p>Between the screen and the map</p>
+<div class="table methods"><table><tr><th>Method</th><th>Does</th></tr>
+<tr><td><code>toMap(_ sx: Float, _ sy: Float) -&gt; (Float, Float)</code></td><td>The map point under a point of the Canvas.</td></tr>
+<tr><td><code>toScreen(_ x: Float, _ y: Float) -&gt; (Float, Float)</code></td><td>The point of the Canvas where a map point shows.</td></tr>
+<tr><td><code>toLonLat(_ sx: Float, _ sy: Float) -&gt; (Float, Float)</code></td><td>Longitude and latitude (degrees, WGS 84) under a point of the Canvas.</td></tr>
+<tr><td><code>fromLonLat(_ lon: Float, _ lat: Float) -&gt; (Float, Float)</code></td><td>The point of the Canvas where a longitude and latitude show.</td></tr>
+</table></div>
+<p>Finding and selecting features</p>
+<div class="table methods"><table><tr><th>Method</th><th>Does</th></tr>
+<tr><td><code>featuresAt(_ sx: Float, _ sy: Float, tolerance: Float = 4.0) -&gt; [Hit]</code></td><td>Features within <code>tolerance</code> points of a point of the Canvas: top layer first, and in each layer the feature drawn on top first. Only visible vector layers are searched.</td></tr>
+<tr><td><code>featureAt(_ sx: Float, _ sy: Float, tolerance: Float = 4.0) -&gt; Hit?</code></td><td>The top feature there, or nil.</td></tr>
+<tr><td><code>featuresIn(layer: Int, _ x1: Float, _ y1: Float, _ x2: Float, _ y2: Float) -&gt; [Int]</code></td><td>Rows of a layer whose shapes touch a rectangle of the Canvas between two corners.</td></tr>
+<tr><td><code>attributes(_ hit: Hit) -&gt; [(String, String)]</code></td><td>A feature's values by field name, as they're shown.</td></tr>
+<tr><td><code>select(layer: Int, rows: [Int])</code></td><td>Selects rows of a layer (and only them, in that layer). Selections are drawn in yellow.</td></tr>
+<tr><td><code>clearSelection()</code></td><td>Clears the selection of every layer.</td></tr>
+</table></div>
+<p>Drawing</p>
+<div class="table methods"><table><tr><th>Method</th><th>Does</th></tr>
+<tr><td><code>draw(_ g: Graphics)</code></td><td>Draws the map on a Canvas. Call <code>vp.resize</code> from <code>.onResize</code> first, or use <code>MapView</code>, which does.</td></tr>
+<tr><td><code>savePicture(_ path: String, width: Float, height: Float, scale: Float = 2.0) -&gt; Bool</code></td><td>Saves what <code>vp</code> shows as a PNG (or JPEG for <code>.jpg</code>) <code>width</code> × <code>height</code> points. Tiles not downloaded yet are left out.</td></tr>
+</table></div>
+</section>
+
+<section class="doc" id="mapview">
+<h2>MapView</h2>
+<div class="api" id="MapView">
+<pre class="tsl sig">public view MapView(map: bind Map, scaleBar: Bool = true, zoomButtons: Bool = true, northArrow: Bool = false,
+                    legend: Bool = false, imperial: Bool = false, selects: Bool = true, keys: Bool = false,
+                    onMouse: fn(Float, Float) = { lon, lat in }, onClick: fn(Hit?) = { hit in })</pre>
+<div class="desc"><p>A ready-made map for an app, bound to a <code>Map</code> in the app's state. A drag pans; the wheel or a pinch zooms about the mouse; a double click fits the map; Shift and a drag zooms into a box. Tiles download as the view moves.</p><ul><li><code>scaleBar</code>, <code>zoomButtons</code> (+, − and ⤢), <code>northArrow</code>, <code>legend</code>: what's drawn over the map.</li><li><code>imperial</code>: the scale bar in feet and miles.</li><li><code>selects</code>: a clicked feature is also selected, and others cleared.</li><li><code>keys</code>: arrows pan, + and − zoom, 0 shows everything. It takes the window's keys while the map shows, so it's off unless asked.</li><li><code>onMouse</code>: gets the longitude and latitude under the mouse as it moves.</li><li><code>onClick</code> (the trailing block): gets the top feature under a click, or nil.</li></ul>
+</div></div>
+<pre class="tsl">state m = startingMap()
+state picked = ""
+state place = ""
+
+cartography.MapView(map: m, northArrow: true, legend: true, onMouse: { lon, lat in
+    place = "{lat.formatted(decimals: 4)}, {lon.formatted(decimals: 4)}"
+}) { hit in
+    if let h = hit {
+        picked = m.attributes(h).map { p in "{p.0}: {p.1}" }.joined(separator: ", ")
+    }
+}</pre>
+</section>
+
+<section class="doc" id="canvas">
+<h2>Your own Canvas</h2>
+<p>To draw a map in a Canvas of your own instead of <code>MapView</code>:</p>
+<ol class="steps"><li>Call <code>m.vp.resize(w, h)</code> from <code>.onResize</code>.</li><li>Pass pointer events to <code>m.vp.handle(e)</code>; it returns whether the view changed.</li><li>Call <code>m.draw(g)</code>, then <a href="#drawLegend"><code>drawLegend</code></a>, <a href="#drawMapScaleBar"><code>drawMapScaleBar</code></a> and <a href="#drawNorthArrow"><code>drawNorthArrow</code></a> where you want them.</li><li>For basemaps, call <a href="#fetchTiles"><code>fetchTiles</code></a> after every change of view, and keep the files it starts in <code>m.loading</code>.</li><li>With <code>vp.smooth</code> on, call <code>m.vp.tick()</code> from a timer (<code>every(seconds:)</code>) so moves animate; or set <code>m.vp.smooth = false</code>.</li></ol>
+<pre class="tsl">Canvas { g in
+    let _r = redraw                 // draw again when a tile comes in
+    m.draw(g)
+    cartography.drawMapScaleBar(g, m, x: 14, y: g.height - 22)
+}
+.onResize { w, h in
+    m.vp.resize(w, h)
+    fetch()
+}
+.onPointer { e in
+    if m.vp.handle(e) {
+        fetch()
+    }
+}
+
+fn fetch() {
+    let started = cartography.fetchTiles(m, arrived: { path, ok in
+        m.loading.remove(path)
+        redraw += 1
+    }) { paths in
+        if cartography.warpTileLayers(m) {   // only maps not in Web Mercator
+            redraw += 1
+        }
+    }
+    for path in started {
+        m.loading.insert(path)
+    }
+}</pre>
+<p>The <a href="examples.html#own-canvas">own Canvas example</a> is a whole program. Lower-level drawing functions:</p>
+<div class="api" id="drawMap">
+<pre class="tsl sig">public fn drawMap(_ g: Graphics, _ m: Map)</pre>
+<div class="desc">Draws a map on a Canvas: what <code>Map.draw</code> does.
+</div></div>
+<div class="api" id="beginMapSpace">
+<pre class="tsl sig">public fn beginMapSpace(_ g: Graphics, _ v: viewport.Viewport)</pre>
+<div class="desc">Points the map's coordinates at the Canvas: after this, shapes are given in map coordinates (until <code>g.restore()</code>). For drawing your own shapes over the map.
+</div></div>
+<div class="api" id="drawPixels">
+<pre class="tsl sig">public fn drawPixels(_ g: Graphics, _ r: Raster, _ v: viewport.Viewport, _ opacity: Float)</pre>
+<div class="desc">Draws a raster's pixels (made by <code>renderRaster</code>, or warped tiles) over the part of the map they cover.
+</div></div>
+<div class="api" id="drawPicture">
+<pre class="tsl sig">public fn drawPicture(_ g: Graphics, _ path: String, _ b: Box, _ v: viewport.Viewport, _ opacity: Float) -&gt; Bool</pre>
+<div class="desc">Draws a picture file over a box of the map (tiles, scanned maps).
+</div></div>
+<div class="api" id="drawTileLayer">
+<pre class="tsl sig">public fn drawTileLayer(_ g: Graphics, _ layer: Layer, _ m: Map)</pre>
+<div class="desc">Draws a tile layer (<code>drawMap</code> calls it). In Web Mercator, the tiles on disk, with a tile up to six zooms further out standing in for one not there yet; in other systems, the layer's warped picture. It downloads nothing.
+</div></div>
+<div class="api" id="toViewportBox">
+<pre class="tsl sig">public fn toViewportBox(_ b: Box) -&gt; viewport.Box</pre>
+<div class="desc">A cartography <code>Box</code> as a viewport Box.
+</div></div>
+<div class="api" id="fromViewportBox">
+<pre class="tsl sig">public fn fromViewportBox(_ b: viewport.Box) -&gt; Box</pre>
+<div class="desc">A viewport Box as a cartography <code>Box</code>.
+</div></div>
+<div class="api" id="visibleBox">
+<pre class="tsl sig">public fn visibleBox(_ vp: viewport.Viewport) -&gt; Box</pre>
+<div class="desc">The part of the map a viewport shows.
+</div></div>
+<div class="api" id="unitsPerPoint">
+<pre class="tsl sig">public fn unitsPerPoint(_ vp: viewport.Viewport) -&gt; Float</pre>
+<div class="desc">How many map units one point of the Canvas covers.
+</div></div>
+</section>
+
+<section class="doc" id="decor">
+<h2>Legend, scale bar, north arrow</h2>
+<div class="api" id="drawLegend">
+<pre class="tsl sig">public fn drawLegend(_ g: Graphics, _ m: Map, x: Float, y: Float, maxEntries: Int = 30, title: String = "") -&gt; (Float, Float)</pre>
+<div class="desc">Draws a legend in a box with its top left corner at (x, y) and returns the box's width and height. <code>maxEntries</code> cuts a long legend short.
+</div></div>
+<div class="api" id="legendEntries">
+<pre class="tsl sig">public fn legendEntries(_ m: Map) -&gt; [LegendEntry]</pre>
+<div class="desc">What a legend shows: each visible vector layer, top layer first, with its symbol, or its name and then each of its classes. Raster layers with a ramp show their lowest and highest values.
+</div></div>
+<div class="api" id="LegendEntry">
+<pre class="tsl sig">public struct LegendEntry</pre>
+<div class="desc">One line of a legend: a symbol and what it stands for, or a layer's name as a heading.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>text</code></td><td><code>String</code></td><td></td></tr>
+<tr><td><code>heading</code></td><td><code>Bool</code></td><td>A layer's name, with no symbol. Default false.</td></tr>
+<tr><td><code>kind</code></td><td><code>GeomKind</code></td><td>How the symbol is drawn. Default <code>.point</code>.</td></tr>
+<tr><td><code>symbol</code></td><td><code>Symbol</code></td><td></td></tr>
+</table></div>
+</div></div>
+<div class="api" id="drawSwatch">
+<pre class="tsl sig">public fn drawSwatch(_ g: Graphics, _ kind: GeomKind, _ s: Symbol, x: Float, y: Float, width: Float, height: Float)</pre>
+<div class="desc">Draws a symbol as a legend shows it, in a box of the screen: a marker in the middle, a line across, or a filled rectangle. For legends of your own.
+</div></div>
+<div class="api" id="drawMapScaleBar">
+<pre class="tsl sig">public fn drawMapScaleBar(_ g: Graphics, _ m: Map, x: Float, y: Float, maxWidth: Float = 120.0, imperial: Bool = false, color: Color = .rgb(40, 40, 40))</pre>
+<div class="desc">Draws a scale bar with its left end at (x, y), the bar's baseline.
+</div></div>
+<div class="api" id="mapScaleBar">
+<pre class="tsl sig">public fn mapScaleBar(_ m: Map, maxWidth: Float = 120.0, imperial: Bool = false) -&gt; MapScaleBar</pre>
+<div class="desc">The longest round length (1, 2 or 5 times a power of ten) that fits in <code>maxWidth</code> points at the middle of the map; in feet and miles with <code>imperial</code>.
+</div></div>
+<div class="api" id="MapScaleBar">
+<pre class="tsl sig">public struct MapScaleBar</pre>
+<div class="desc">A scale bar's length on the ground, on screen, and its label.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>meters</code></td><td><code>Float</code></td><td>Its length on the ground.</td></tr>
+<tr><td><code>points</code></td><td><code>Float</code></td><td>Its length on screen.</td></tr>
+<tr><td><code>label</code></td><td><code>String</code></td><td>"500 m", "2 km", "1 mi", …</td></tr>
+</table></div>
+</div></div>
+<div class="api" id="drawNorthArrow">
+<pre class="tsl sig">public fn drawNorthArrow(_ g: Graphics, _ m: Map, x: Float, y: Float, size: Float = 28.0, color: Color = .rgb(40, 40, 40))</pre>
+<div class="desc">Draws an arrow pointing to the map's north (up the map's y axis, turned with the map), centered on (x, y).
+</div></div>
+</section>
+
+<section class="doc" id="layers">
+<h2>Layers</h2>
+<p>A <code>Layer</code> is a vector layer (features with shapes and attributes), a tile layer (a basemap) or a raster layer, as <code>kind</code> says. A vector layer has one <a href="#Geometry"><code>Geometry</code></a> in <code>geoms</code> and one value in each of its <code>columns</code> for each feature.</p>
+<pre class="tsl">var towns = cartography.Layer(name: "Towns", geomKind: .point)
+towns.geoms = [cartography.pointGeometry(121.0, 14.6), cartography.pointGeometry(120.6, 16.4)]
+towns.columns = [
+    cartography.textColumn(name: "name", values: ["Manila", "Baguio"]),
+    cartography.numberColumn(name: "people", values: [1846513, 366358], whole: true),
+]
+m.add(towns)</pre>
+<div class="api" id="Layer">
+<pre class="tsl sig">public struct Layer</pre>
+<div class="desc">A layer of a map. The fields you usually set are first; the rest are worked out by <code>refresh()</code> and <code>Map.add</code>.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>name</code></td><td><code>String</code></td><td>Shown in the legend; <code>Map.layerIndex(named:)</code> finds it.</td></tr>
+<tr><td><code>kind</code></td><td><code>LayerKind</code></td><td><code>.vector</code>, <code>.tiles</code> or <code>.raster</code>.</td></tr>
+<tr><td><code>visible</code></td><td><code>Bool</code></td><td>Default true.</td></tr>
+<tr><td><code>opacity</code></td><td><code>Float</code></td><td>From 0 (invisible) to 1.</td></tr>
+<tr><td><code>source</code></td><td><code>String</code></td><td>The file it was read from, or the address of its tiles; "" for a layer made in code.</td></tr>
+<tr><td><code>crs</code></td><td><code>geodesy.Crs</code></td><td>The system of <code>geoms</code>. Default WGS 84.</td></tr>
+<tr><td><code>geomKind</code></td><td><code>GeomKind</code></td><td><code>.point</code>, <code>.line</code> or <code>.polygon</code>.</td></tr>
+<tr><td><code>geoms</code></td><td><code>[Geometry]</code></td><td>Each feature's shape, in the layer's CRS.</td></tr>
+<tr><td><code>columns</code></td><td><code>[Column]</code></td><td>Each field's values, one for each feature.</td></tr>
+<tr><td><code>style</code></td><td><code>Style</code></td><td>How features are drawn; see <a href="#styles">Styles</a>.</td></tr>
+<tr><td><code>labels</code></td><td><code>LabelStyle</code></td><td>See <a href="#labels">Labels</a>.</td></tr>
+<tr><td><code>selection</code></td><td><code>[Int]</code></td><td>The rows that are selected.</td></tr>
+<tr><td><code>hidden</code></td><td><code>[Bool]</code></td><td>Features left out of the drawing and of searches (empty: none). Set it to filter a layer, then refresh.</td></tr>
+<tr><td><code>minScale, maxScale</code></td><td><code>Float</code></td><td>The layer is drawn only between these scales (1:N, the larger number further out; 0: no limit).</td></tr>
+<tr><td><code>labelTexts</code></td><td><code>[String]</code></td><td>Each feature's label when it isn't the value of the labels' field (empty: the field's values).</td></tr>
+<tr><td><code>modified</code></td><td><code>Bool</code></td><td>Changed since it was read or saved.</td></tr>
+<tr><td><code>urlTemplate, minZoom, maxZoom, attribution</code></td><td><code></code></td><td>Tile layers: see <a href="#tiles">Basemap tiles</a>.</td></tr>
+<tr><td><code>raster, rasterStyle</code></td><td><code>Raster, RasterStyle</code></td><td>Raster layers: see <a href="#rasters">Rasters</a>.</td></tr>
+<tr><td><code>shapes</code></td><td><code>[Geometry]</code></td><td>Worked out: the shapes in the map's CRS, as drawn.</td></tr>
+<tr><td><code>classOf</code></td><td><code>[Int]</code></td><td>Worked out: each feature's class in a categorized or graduated style (-1: none).</td></tr>
+<tr><td><code>anchors, anchorAngles</code></td><td><code>[Float]</code></td><td>Worked out: where each label goes (x, y pairs in the map's CRS) and which way lines run there.</td></tr>
+<tr><td><code>sizes, sizeRange, turns</code></td><td><code>[Float]</code></td><td>Worked out: each feature's size and turn from <code>style.sizeField</code> and <code>style.rotationField</code>.</td></tr>
+<tr><td><code>gridCells, gridLarge, gridBox, gridColumns, gridRows, gridMark</code></td><td><code></code></td><td>Worked out: a grid over large layers to find features fast.</td></tr>
+</table></div>
+</div></div>
+<h3>Layer methods</h3>
+<div class="table methods"><table><tr><th>Method</th><th>Does</th></tr>
+<tr><td><code>featureCount() -&gt; Int</code></td><td>How many features there are.</td></tr>
+<tr><td><code>fieldNames() -&gt; [String]</code></td><td>The columns' names.</td></tr>
+<tr><td><code>columnIndex(_ name: String) -&gt; Int?</code></td><td>The place of the column called <code>name</code> (whatever its capitals), or nil.</td></tr>
+<tr><td><code>row(_ at: Int) -&gt; [Value]</code></td><td>The values of one feature, in the order of the columns.</td></tr>
+<tr><td><code>addFeature(_ geom: Geometry, values: [Value] = [])</code></td><td>Adds a feature: its shape and a value for each column (missing ones are empty).</td></tr>
+<tr><td><code>removeFeatures(_ rows: [Int])</code></td><td>Removes the features at <code>rows</code>.</td></tr>
+<tr><td><code>addColumn(name: String, kind: FieldKind)</code></td><td>Adds a column of empty values.</td></tr>
+<tr><td><code>extent() -&gt; Box</code></td><td>The box around every feature, in the layer's CRS.</td></tr>
+<tr><td><code>shownExtent() -&gt; Box</code></td><td>The same, as drawn (in the map's CRS).</td></tr>
+<tr><td><code>isHidden(_ row: Int) -&gt; Bool</code></td><td>Is a feature left out by the filter?</td></tr>
+<tr><td><code>shownCount() -&gt; Int</code></td><td>How many features the filter lets through.</td></tr>
+<tr><td><code>showsAt(_ denominator: Float) -&gt; Bool</code></td><td>Is the layer drawn at a scale of 1:<code>denominator</code>?</td></tr>
+<tr><td><code>rowsNear(_ b: Box) -&gt; [Int]</code></td><td>Rows whose shapes may touch a box (in the map's CRS); their boxes are still to be checked.</td></tr>
+<tr><td><code>refresh()</code></td><td>Works out each feature's class and where its label goes. <code>Map.refresh(i)</code> calls it.</td></tr>
+<tr><td><code>project(to: geodesy.Crs)</code></td><td>Works out <code>shapes</code> from <code>geoms</code> for a map in another CRS.</td></tr>
+<tr><td><code>indexShapes()</code></td><td>Makes the grid of <code>rowsNear</code> again if the shapes changed.</td></tr>
+</table></div>
+<div class="api" id="newVectorLayer">
+<pre class="tsl sig">public fn newVectorLayer(name: String, geomKind: GeomKind, crs: geodesy.Crs) -&gt; Layer</pre>
+<div class="desc">A new, empty vector layer.
+</div></div>
+<div class="api" id="LayerKind">
+<pre class="tsl sig">public enum LayerKind { vector, tiles, raster }</pre>
+<div class="desc">What a layer holds.
+</div></div>
+</section>
+
+<section class="doc" id="geometry">
+<h2>Geometry</h2>
+<p>Coordinates are flat lists of numbers: <code>[x, y, x, y, …]</code>. A line is one list, a polygon a list of rings (the outside, then its holes).</p>
+<div class="api" id="GeomKind">
+<pre class="tsl sig">public enum GeomKind { point, line, polygon }</pre>
+<div class="desc">What a geometry is made of.
+</div></div>
+<div class="api" id="Geometry">
+<pre class="tsl sig">public struct Geometry</pre>
+<div class="desc">One feature's shape: points, lines or polygons, one or several of them.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>kind</code></td><td><code>GeomKind</code></td><td></td></tr>
+<tr><td><code>parts</code></td><td><code>[[Float]]</code></td><td>Each point (x, y), line or ring.</td></tr>
+<tr><td><code>polygons</code></td><td><code>[Int]</code></td><td>For polygons: the place in <code>parts</code> of each polygon's outer ring.</td></tr>
+<tr><td><code>box</code></td><td><code>Box</code></td><td>The box around every point.</td></tr>
+</table></div>
+</div></div>
+<div class="table methods"><table><tr><th>Method</th><th>Does</th></tr>
+<tr><td><code>isEmpty() -&gt; Bool</code></td><td>A feature without a shape (a row of a table).</td></tr>
+<tr><td><code>pointCount() -&gt; Int</code></td><td>How many points it has, in all.</td></tr>
+<tr><td><code>memberCount() -&gt; Int</code></td><td>How many points, lines or polygons it's made of.</td></tr>
+<tr><td><code>rings(of: Int) -&gt; [[Float]]</code></td><td>The rings of polygon <code>of</code>: its outside, then its holes.</td></tr>
+<tr><td><code>mapped(_ change: fn(Float, Float) -&gt; (Float, Float)) -&gt; Geometry</code></td><td>The same shape with each point changed.</td></tr>
+</table></div>
+<h3>Making shapes</h3>
+<div class="api" id="pointGeometry">
+<pre class="tsl sig">public fn pointGeometry(_ x: Float, _ y: Float) -&gt; Geometry</pre>
+<div class="desc">A point.
+</div></div>
+<div class="api" id="multiPointGeometry">
+<pre class="tsl sig">public fn multiPointGeometry(_ coords: [Float]) -&gt; Geometry</pre>
+<div class="desc">Several points as one feature.
+</div></div>
+<div class="api" id="lineGeometry">
+<pre class="tsl sig">public fn lineGeometry(_ coords: [Float]) -&gt; Geometry</pre>
+<div class="desc">A line through the points.
+</div></div>
+<div class="api" id="multiLineGeometry">
+<pre class="tsl sig">public fn multiLineGeometry(_ parts: [[Float]]) -&gt; Geometry</pre>
+<div class="desc">Several lines as one feature.
+</div></div>
+<div class="api" id="polygonGeometry">
+<pre class="tsl sig">public fn polygonGeometry(_ rings: [[Float]]) -&gt; Geometry</pre>
+<div class="desc">One polygon: its outer ring, then its holes. Rings are closed if they aren't.
+</div></div>
+<div class="api" id="multiPolygonGeometry">
+<pre class="tsl sig">public fn multiPolygonGeometry(_ polygons: [[[Float]]]) -&gt; Geometry</pre>
+<div class="desc">Several polygons as one feature, each a list of rings.
+</div></div>
+<div class="api" id="boxGeometry">
+<pre class="tsl sig">public fn boxGeometry(_ b: Box) -&gt; Geometry</pre>
+<div class="desc">A rectangle as a polygon.
+</div></div>
+<div class="api" id="emptyGeometry">
+<pre class="tsl sig">public fn emptyGeometry(_ kind: GeomKind) -&gt; Geometry</pre>
+<div class="desc">A shape with nothing in it.
+</div></div>
+<div class="api" id="makeGeometry">
+<pre class="tsl sig">public fn makeGeometry(kind: GeomKind, parts: [[Float]], polygons: [Int] = []) -&gt; Geometry</pre>
+<div class="desc">A geometry from its parts, with its box worked out. Rings of polygons are closed if they aren't.
+</div></div>
+<h3>Boxes</h3>
+<div class="api" id="Box">
+<pre class="tsl sig">public struct Box</pre>
+<div class="desc">A rectangle with sides along the axes; <code>empty</code> until something is added.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>minX, minY, maxX, maxY</code></td><td><code>Float</code></td><td></td></tr>
+<tr><td><code>empty</code></td><td><code>Bool</code></td><td>Default true.</td></tr>
+</table></div>
+</div></div>
+<div class="table methods"><table><tr><th>Method</th><th>Does</th></tr>
+<tr><td><code>width(), height(), centerX(), centerY() -&gt; Float</code></td><td>Its size and middle.</td></tr>
+<tr><td><code>add(_ x: Float, _ y: Float)</code></td><td>Grows the box to hold the point.</td></tr>
+<tr><td><code>include(_ other: Box)</code></td><td>Grows the box to hold another one.</td></tr>
+<tr><td><code>contains(_ x: Float, _ y: Float) -&gt; Bool</code></td><td>Is the point inside?</td></tr>
+<tr><td><code>intersects(_ other: Box) -&gt; Bool</code></td><td>Do the boxes overlap?</td></tr>
+<tr><td><code>grown(by: Float) -&gt; Box</code></td><td>The box with a margin added on every side.</td></tr>
+</table></div>
+<div class="api" id="boxOf">
+<pre class="tsl sig">public fn boxOf(minX: Float, minY: Float, maxX: Float, maxY: Float) -&gt; Box</pre>
+<div class="desc">A box from its edges.
+</div></div>
+<h3>Measuring and testing</h3>
+<div class="api" id="distanceTo">
+<pre class="tsl sig">public fn distanceTo(_ g: Geometry, _ x: Float, _ y: Float) -&gt; Float</pre>
+<div class="desc">How far a point is from the geometry: 0 inside a polygon, otherwise the distance to its nearest point, line or edge. Infinity for an empty geometry.
+</div></div>
+<div class="api" id="polygonContains">
+<pre class="tsl sig">public fn polygonContains(_ g: Geometry, _ x: Float, _ y: Float) -&gt; Bool</pre>
+<div class="desc">Is the point inside an outer ring and in none of its holes?
+</div></div>
+<div class="api" id="ringContains">
+<pre class="tsl sig">public fn ringContains(_ ring: [Float], _ x: Float, _ y: Float) -&gt; Bool</pre>
+<div class="desc">Is the point inside the ring, or on its edge?
+</div></div>
+<div class="api" id="ringArea2">
+<pre class="tsl sig">public fn ringArea2(_ ring: [Float]) -&gt; Float</pre>
+<div class="desc">Twice the area inside a ring, positive when it runs counterclockwise (with y up).
+</div></div>
+<div class="api" id="lineLength">
+<pre class="tsl sig">public fn lineLength(_ line: [Float]) -&gt; Float</pre>
+<div class="desc">The length of a line in its own units. For meters in a system of degrees, reproject it first or use <a href="#metersPerUnit"><code>metersPerUnit</code></a>.
+</div></div>
+<div class="api" id="segmentDistance">
+<pre class="tsl sig">public fn segmentDistance(_ px: Float, _ py: Float, _ x1: Float, _ y1: Float, _ x2: Float, _ y2: Float) -&gt; Float</pre>
+<div class="desc">The distance from a point to a segment.
+</div></div>
+<div class="api" id="segmentsCross">
+<pre class="tsl sig">public fn segmentsCross(_ ax: Float, _ ay: Float, _ bx: Float, _ by: Float, _ cx: Float, _ cy: Float, _ dx: Float, _ dy: Float) -&gt; Bool</pre>
+<div class="desc">Do two segments cross or touch?
+</div></div>
+<div class="api" id="oriented">
+<pre class="tsl sig">public fn oriented(_ g: Geometry) -&gt; Geometry</pre>
+<div class="desc">A polygon with its outer rings counterclockwise and its holes clockwise.
+</div></div>
+</section>
+
+<section class="doc" id="tables">
+<h2>Attributes</h2>
+<p>Each column holds one field's values for every feature: numbers in <code>nums</code> (NaN: no value) or text in <code>texts</code> ("": no value).</p>
+<div class="api" id="Column">
+<pre class="tsl sig">public struct Column</pre>
+<div class="desc">One field of a layer.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>name</code></td><td><code>String</code></td><td></td></tr>
+<tr><td><code>kind</code></td><td><code>FieldKind</code></td><td><code>.int</code>, <code>.float</code> or <code>.text</code>.</td></tr>
+<tr><td><code>nums</code></td><td><code>[Float]</code></td><td>The values of a number column.</td></tr>
+<tr><td><code>texts</code></td><td><code>[String]</code></td><td>The values of a text column.</td></tr>
+</table></div>
+</div></div>
+<div class="table methods"><table><tr><th>Method</th><th>Does</th></tr>
+<tr><td><code>count() -&gt; Int</code></td><td>How many values.</td></tr>
+<tr><td><code>isNumeric() -&gt; Bool</code></td><td>An <code>.int</code> or <code>.float</code> column?</td></tr>
+<tr><td><code>value(_ row: Int) -&gt; Value</code></td><td>One value.</td></tr>
+<tr><td><code>display(_ row: Int) -&gt; String</code></td><td>A value as shown in a table.</td></tr>
+<tr><td><code>number(_ row: Int) -&gt; Float</code></td><td>A value as a number: NaN if it has none or its text isn't one.</td></tr>
+<tr><td><code>isNull(_ row: Int) -&gt; Bool</code></td><td>Has it no value?</td></tr>
+<tr><td><code>set(_ row: Int, to: Value)</code></td><td>Changes a value.</td></tr>
+<tr><td><code>append(_ value: Value)</code></td><td>Adds a value at the end.</td></tr>
+<tr><td><code>remove(at: Int)</code></td><td>Removes a value.</td></tr>
+<tr><td><code>picking(_ rows: [Int]) -&gt; Column</code></td><td>A column of the same field with only the rows listed.</td></tr>
+</table></div>
+<div class="api" id="textColumn">
+<pre class="tsl sig">public fn textColumn(name: String, values: [String]) -&gt; Column</pre>
+<div class="desc">A column of text.
+</div></div>
+<div class="api" id="numberColumn">
+<pre class="tsl sig">public fn numberColumn(name: String, values: [Float], whole: Bool = false) -&gt; Column</pre>
+<div class="desc">A column of numbers; <code>whole</code> for whole numbers.
+</div></div>
+<div class="api" id="emptyColumn">
+<pre class="tsl sig">public fn emptyColumn(name: String, kind: FieldKind, count: Int) -&gt; Column</pre>
+<div class="desc">A column of <code>count</code> empty values.
+</div></div>
+<div class="api" id="columnFromTexts">
+<pre class="tsl sig">public fn columnFromTexts(name: String, values: [String]) -&gt; Column</pre>
+<div class="desc">A column from text as it comes from a file: whole numbers if every value is one, numbers if every value is a number, text otherwise. Empty values are no value.
+</div></div>
+<div class="api" id="FieldKind">
+<pre class="tsl sig">public enum FieldKind { int, float, text }</pre>
+<div class="desc">What a column holds.
+</div></div>
+<div class="api" id="Value">
+<pre class="tsl sig">public enum Value {
+    null
+    num(value: Float)
+    text(value: String)
+    bool(value: Bool)
+}</pre>
+<div class="desc">One attribute of one feature, whatever its field's kind. <code>isNull()</code>, <code>display()</code> (whole numbers without decimals, nothing for null), <code>number()</code> (NaN if it isn't one) and <code>truthy()</code>.
+</div></div>
+<div class="api" id="formatNumber">
+<pre class="tsl sig">public fn formatNumber(_ x: Float, decimals: Int = 6) -&gt; String</pre>
+<div class="desc">A number as text: <code>12</code> for 12.0, up to <code>decimals</code> digits otherwise, without zeros at the end.
+</div></div>
+<div class="api" id="groupedNumber">
+<pre class="tsl sig">public fn groupedNumber(_ x: Float, decimals: Int = 0) -&gt; String</pre>
+<div class="desc">A number with a separator between its thousands: 1,234,567.5
+</div></div>
+</section>
+
+<section class="doc" id="styles">
+<h2>Symbols and styles</h2>
+<p>A layer's <code>style</code> is a single symbol for every feature, a class for each value of a field (categorized), or classes of a number field's values (graduated). After changing a style on a map, call <code>m.refresh(i)</code>.</p>
+<pre class="tsl">var roads = layers[0]
+roads.style.symbol = cartography.Symbol(stroke: cartography.rgb(200, 40, 40), strokeWidth: 3, casing: true)
+
+var parcels = layers[1]
+parcels.style = cartography.categorizedStyle(layer: parcels, field: "landuse")
+
+var countries = layers[2]
+countries.style = cartography.graduatedStyle(layer: countries, field: "POP_EST",
+    mode: .naturalBreaks, count: 5, ramp: "YlOrRd")
+countries.style.classes[0].label = "Fewest"</pre>
+<div class="api" id="Symbol">
+<pre class="tsl sig">public struct Symbol</pre>
+<div class="desc">How one feature is drawn. Points use <code>marker</code> and <code>size</code>; lines <code>stroke</code>, <code>strokeWidth</code> and <code>dash</code>; polygons <code>fill</code> and <code>fillStyle</code>, with the stroke for their edge.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>fill</code></td><td><code>Rgba</code></td><td>Default rgb(86, 156, 214).</td></tr>
+<tr><td><code>stroke</code></td><td><code>Rgba</code></td><td>Default rgb(35, 35, 35).</td></tr>
+<tr><td><code>strokeWidth</code></td><td><code>Float</code></td><td>Points. Default 1.</td></tr>
+<tr><td><code>size</code></td><td><code>Float</code></td><td>A marker's width, in points. Default 8.</td></tr>
+<tr><td><code>marker</code></td><td><code>MarkerShape</code></td><td>Default <code>.circle</code>.</td></tr>
+<tr><td><code>dash</code></td><td><code>[Float]</code></td><td>Lengths of dashes and gaps in points; empty for a solid line.</td></tr>
+<tr><td><code>fillStyle</code></td><td><code>FillStyle</code></td><td>Solid, none, or one of six hatches.</td></tr>
+<tr><td><code>arrow</code></td><td><code>Bool</code></td><td>A line ends in an arrow head.</td></tr>
+<tr><td><code>picture</code></td><td><code>String</code></td><td>A PNG, JPEG or SVG file drawn as the marker instead of a shape.</td></tr>
+<tr><td><code>rotation</code></td><td><code>Float</code></td><td>A marker is turned this many degrees clockwise.</td></tr>
+<tr><td><code>markerLine, markerInterval</code></td><td><code>Bool, Float</code></td><td>Lines: markers along them, <code>markerInterval</code> points apart (default 40), turned the way the line runs.</td></tr>
+<tr><td><code>casing, casingColor, casingWidth</code></td><td><code>Bool, Rgba, Float</code></td><td>Lines: an edge of another color on each side, like a road's.</td></tr>
+</table></div>
+</div></div>
+<div class="api" id="MarkerShape">
+<pre class="tsl sig">public enum MarkerShape { circle, square, triangle, diamond, cross, star, pentagon, hexagon, arrow, x }</pre>
+<div class="desc">The shapes of point markers.
+</div></div>
+<div class="api" id="FillStyle">
+<pre class="tsl sig">public enum FillStyle { solid, none, horizontal, vertical, forward, backward, cross, diagonalCross }</pre>
+<div class="desc">How a polygon is filled: with its color all over, not at all, or with lines of it.
+</div></div>
+<div class="api" id="Style">
+<pre class="tsl sig">public struct Style</pre>
+<div class="desc">How a layer's features are drawn.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>kind</code></td><td><code>RendererKind</code></td><td><code>.single</code>, <code>.categorized</code> or <code>.graduated</code>.</td></tr>
+<tr><td><code>symbol</code></td><td><code>Symbol</code></td><td>The symbol of a single style, and the base of classes.</td></tr>
+<tr><td><code>field</code></td><td><code>String</code></td><td>The field a categorized or graduated style goes by.</td></tr>
+<tr><td><code>classes</code></td><td><code>[StyleClass]</code></td><td>Its classes. Change their symbols and labels freely.</td></tr>
+<tr><td><code>mode</code></td><td><code>ClassMode</code></td><td>How graduated classes were made.</td></tr>
+<tr><td><code>ramp</code></td><td><code>String</code></td><td>The ramp classes are colored along ("": the palette).</td></tr>
+<tr><td><code>sizeField, sizeFrom, sizeTo</code></td><td><code>String, Float, Float</code></td><td>Sizes by a number field: markers (by area) or line widths from <code>sizeFrom</code> to <code>sizeTo</code> points (defaults 4 and 24).</td></tr>
+<tr><td><code>rotationField</code></td><td><code>String</code></td><td>Markers turned by a field's value (degrees clockwise), on top of the symbol's own turn.</td></tr>
+</table></div>
+</div></div>
+<div class="api" id="StyleClass">
+<pre class="tsl sig">public struct StyleClass</pre>
+<div class="desc">One class of a categorized or graduated style.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>label</code></td><td><code>String</code></td><td>What the legend says.</td></tr>
+<tr><td><code>value</code></td><td><code>String</code></td><td>Categorized: the value features of this class have.</td></tr>
+<tr><td><code>lower, upper</code></td><td><code>Float</code></td><td>Graduated: values from <code>lower</code> up to <code>upper</code> (the last class includes it).</td></tr>
+<tr><td><code>symbol</code></td><td><code>Symbol</code></td><td></td></tr>
+<tr><td><code>visible</code></td><td><code>Bool</code></td><td>Unticked classes aren't drawn.</td></tr>
+</table></div>
+</div></div>
+<div class="api" id="RendererKind">
+<pre class="tsl sig">public enum RendererKind { single, categorized, graduated }</pre>
+<div class="desc">What kind of style a layer has.
+</div></div>
+<div class="api" id="ClassMode">
+<pre class="tsl sig">public enum ClassMode { equalInterval, quantile, naturalBreaks, prettyBreaks }</pre>
+<div class="desc">How a graduated style's classes are made. <code>naturalBreaks</code> is Jenks.
+</div></div>
+<div class="api" id="categorizedStyle">
+<pre class="tsl sig">public fn categorizedStyle(layer: Layer, field: String, ramp: String = "") -&gt; Style</pre>
+<div class="desc">A style with one class for each different value of a field, colored from the palette or along a ramp.
+</div></div>
+<div class="api" id="graduatedStyle">
+<pre class="tsl sig">public fn graduatedStyle(layer: Layer, field: String, mode: ClassMode, count: Int, ramp: String) -&gt; Style</pre>
+<div class="desc">A style with classes of a number field's values, colored along a ramp.
+</div></div>
+<div class="api" id="classBreaks">
+<pre class="tsl sig">public fn classBreaks(_ values: [Float], mode: ClassMode, count: Int) -&gt; [Float]</pre>
+<div class="desc">The limits of <code>count</code> classes: <code>count + 1</code> values from the smallest to the largest.
+</div></div>
+<div class="api" id="classForNumber">
+<pre class="tsl sig">public fn classForNumber(_ style: Style, _ x: Float) -&gt; Int</pre>
+<div class="desc">The class a value falls in, for a graduated style (-1: none).
+</div></div>
+<div class="api" id="uniqueValues">
+<pre class="tsl sig">public fn uniqueValues(_ column: Column, limit: Int = 500) -&gt; [String]</pre>
+<div class="desc">The different values of a column, in order (numbers by size), at most <code>limit</code> of them.
+</div></div>
+<div class="api" id="defaultSymbol">
+<pre class="tsl sig">public fn defaultSymbol(_ kind: GeomKind, seed: Int) -&gt; Symbol</pre>
+<div class="desc">The symbol a new layer starts with: a palette color (by <code>seed</code>), drawn the way its kind of shape usually is.
+</div></div>
+<div class="api" id="recolored">
+<pre class="tsl sig">public fn recolored(_ base: Symbol, _ c: Rgba, kind: GeomKind) -&gt; Symbol</pre>
+<div class="desc">A symbol like <code>base</code> in another color.
+</div></div>
+<h3 id="colors">Colors and ramps</h3>
+<div class="api" id="Rgba">
+<pre class="tsl sig">public struct Rgba</pre>
+<div class="desc">A color: red, green and blue from 0 to 255, and how opaque (0 to 1). <code>color()</code> gives a Tessel <code>Color</code>, <code>withAlpha(a)</code> another opacity, <code>hex()</code> "#rrggbb".
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>r, g, b</code></td><td><code>Int</code></td><td>0 to 255.</td></tr>
+<tr><td><code>a</code></td><td><code>Float</code></td><td>0 to 1. Default 1.</td></tr>
+</table></div>
+</div></div>
+<div class="api" id="rgb">
+<pre class="tsl sig">public fn rgb(_ r: Int, _ g: Int, _ b: Int) -&gt; Rgba</pre>
+<div class="desc">An opaque color.
+</div></div>
+<div class="api" id="colorFromHex">
+<pre class="tsl sig">public fn colorFromHex(_ text: String) -&gt; Rgba?</pre>
+<div class="desc">A color from "#rrggbb" or "#rgb" (with or without the #), or nil.
+</div></div>
+<div class="api" id="palette">
+<pre class="tsl sig">public fn palette() -&gt; [Rgba]</pre>
+<div class="desc">Colors that are easy to tell apart, for categories and new layers.
+</div></div>
+<div class="api" id="rampNames">
+<pre class="tsl sig">public fn rampNames() -&gt; [String]</pre>
+<div class="desc">The color ramps: <code>Viridis</code>, <code>Magma</code>, <code>Plasma</code>, <code>Turbo</code>, <code>Blues</code>, <code>Greens</code>, <code>Reds</code>, <code>Oranges</code>, <code>Purples</code>, <code>Greys</code>, <code>YlGnBu</code>, <code>YlOrRd</code>, <code>RdYlGn</code>, <code>RdYlBu</code>, <code>Spectral</code>, <code>Terrain</code>.
+</div></div>
+<div class="api" id="rampColor">
+<pre class="tsl sig">public fn rampColor(_ name: String, _ t: Float) -&gt; Rgba</pre>
+<div class="desc">The color of a ramp at <code>t</code>, from 0 (its start) to 1 (its end).
+</div></div>
+</section>
+
+<section class="doc" id="labels">
+<h2>Labels</h2>
+<p>Labels are placed where there's room, with a halo by default. Set <code>labels</code> on a layer:</p>
+<pre class="tsl">roads.labels = cartography.LabelStyle(enabled: true, field: "name", curved: true)
+towns.labels = cartography.LabelStyle(enabled: true, field: "name", placement: .right, distance: 3,
+    minScale: 1000000)          // only from 1:1,000,000 in</pre>
+<div class="api" id="LabelStyle">
+<pre class="tsl sig">public struct LabelStyle</pre>
+<div class="desc">How a layer's features are labeled.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>enabled</code></td><td><code>Bool</code></td><td>Default false.</td></tr>
+<tr><td><code>field</code></td><td><code>String</code></td><td>The column whose values are shown.</td></tr>
+<tr><td><code>size</code></td><td><code>Float</code></td><td>Points. Default 11.</td></tr>
+<tr><td><code>color</code></td><td><code>Rgba</code></td><td>Default rgb(30, 30, 30).</td></tr>
+<tr><td><code>halo, haloColor</code></td><td><code>Bool, Rgba</code></td><td>An outline around the letters, white by default.</td></tr>
+<tr><td><code>bold</code></td><td><code>Bool</code></td><td></td></tr>
+<tr><td><code>followLine</code></td><td><code>Bool</code></td><td>Labels of lines turn the way their line runs. Default true.</td></tr>
+<tr><td><code>curved</code></td><td><code>Bool</code></td><td>Labels of lines bend along them, letter by letter.</td></tr>
+<tr><td><code>placement</code></td><td><code>LabelPlacement</code></td><td>Where a point's label goes from its marker. Default <code>.above</code>.</td></tr>
+<tr><td><code>distance</code></td><td><code>Float</code></td><td>Further from (or nearer to) the feature, in points.</td></tr>
+<tr><td><code>minScale, maxScale</code></td><td><code>Float</code></td><td>Labels show only between these scales (1:N; 0: no limit).</td></tr>
+<tr><td><code>wrap</code></td><td><code>Int</code></td><td>Break lines at about this many characters (0: never), and wherever the text says.</td></tr>
+<tr><td><code>background, backgroundColor</code></td><td><code>Bool, Rgba</code></td><td>A box behind each label.</td></tr>
+<tr><td><code>fitInside</code></td><td><code>Bool</code></td><td>Polygons: a label wider than its polygon isn't shown.</td></tr>
+</table></div>
+</div></div>
+<div class="api" id="LabelPlacement">
+<pre class="tsl sig">public enum LabelPlacement { above, below, left, right, center }</pre>
+<div class="desc">Where a point's label goes.
+</div></div>
+<div class="api" id="labelAnchor">
+<pre class="tsl sig">public fn labelAnchor(_ shape: Geometry) -&gt; (Float, Float)</pre>
+<div class="desc">Where a shape's label goes: on a point, in the middle of the longest line, or at the center of the largest ring.
+</div></div>
+<div class="api" id="labelAngle">
+<pre class="tsl sig">public fn labelAngle(_ shape: Geometry) -&gt; Float</pre>
+<div class="desc">Which way a line runs around its middle, in radians on screen (y down), between -π/2 and π/2 so text is never upside down. 0 for anything but a line.
+</div></div>
+</section>
+
+<section class="doc" id="files">
+<h2>Reading and writing files</h2>
+<p><code>readLayers</code> and <code>writeLayer</code> go by the file's extension. Readers give a <code>Result</code> whose error says what's wrong; writers give <code>Error?</code> (nil when it worked).</p>
+<pre class="tsl">match cartography.readLayers("lots.shp") {
+    .failure(e) -&gt; print(e.message)
+    .ok(layers) -&gt; {
+        if let e = cartography.writeLayer(layers[0], "lots.geojson") {
+            print(e.message)
+        }
+    }
+}
+
+// Or, when a failure needs no message:
+if let layers = cartography.readLayers("roads.gpkg").value() { … }</pre>
+<p>Layers keep their file's coordinate system (from a <code>.prj</code>, a GeoPackage's <code>srs_id</code>, GeoTIFF keys, or WGS 84 for GeoJSON, KML and GPX). <code>Map.add</code> reprojects them. A file with shapes of several kinds gives one layer for each kind.</p>
+<div class="api" id="readLayers">
+<pre class="tsl sig">public fn readLayers(_ path: String) -&gt; Result&lt;[Layer]&gt;</pre>
+<div class="desc">Reads a file of map data: GeoJSON (<code>.geojson</code>, <code>.json</code>), a shapefile (<code>.shp</code>, or the <code>.dbf</code>, <code>.shx</code> or <code>.prj</code> beside it), delimited text (<code>.csv</code>, <code>.tsv</code>, <code>.txt</code>), KML, GPX, a GeoPackage, a <code>.wkt</code> file with a geometry on each line, or a raster (see <a href="#readRaster"><code>readRaster</code></a>). Layers are named after the file, with <code>source</code> set to its path.
+</div></div>
+<div class="api" id="writeLayer">
+<pre class="tsl sig">public fn writeLayer(_ layer: Layer, _ path: String) -&gt; Error?</pre>
+<div class="desc">Writes a vector layer: <code>.geojson</code>/<code>.json</code> (WGS 84), <code>.shp</code> (with its <code>.shx</code>, <code>.dbf</code>, <code>.prj</code> and <code>.cpg</code>), <code>.gpkg</code>, <code>.csv</code>, <code>.kml</code> (WGS 84), <code>.gpx</code> (WGS 84; not polygons) or <code>.wkt</code>. A file that's there is replaced.
+</div></div>
+<div class="api" id="readableExtensions">
+<pre class="tsl sig">public fn readableExtensions() -&gt; [String]</pre>
+<div class="desc">The extensions <code>readLayers</code> reads (lower case, no dot).
+</div></div>
+<div class="api" id="writableExtensions">
+<pre class="tsl sig">public fn writableExtensions() -&gt; [String]</pre>
+<div class="desc">The extensions <code>writeLayer</code> writes.
+</div></div>
+<h3 id="geojson">GeoJSON</h3>
+<div class="api" id="readGeoJSON">
+<pre class="tsl sig">public fn readGeoJSON(_ text: String, name: String = "") -&gt; Result&lt;[Layer]&gt;</pre>
+<div class="desc">The layers in GeoJSON text (a FeatureCollection, a Feature or a bare geometry), one for each kind of geometry. Properties become columns: whole numbers, numbers or text (objects and lists as their JSON). A legacy <code>crs</code> member is followed.
+</div></div>
+<div class="api" id="geoJSON">
+<pre class="tsl sig">public fn geoJSON(_ layer: Layer, decimals: Int = 7) -&gt; String</pre>
+<div class="desc">A FeatureCollection in WGS 84 with up to <code>decimals</code> digits (7 is about a centimeter). Outer rings run counterclockwise and holes clockwise, as RFC 7946 asks.
+</div></div>
+<h3 id="shapefile">Shapefile</h3>
+<div class="api" id="readShapefile">
+<pre class="tsl sig">public fn readShapefile(_ path: String) -&gt; Result&lt;Layer&gt;</pre>
+<div class="desc">A shapefile with the attributes of its <code>.dbf</code> and the CRS of its <code>.prj</code> (WGS 84 without one). Text is UTF-8 unless the <code>.cpg</code> says Latin-1. A <code>.dbf</code> alone gives a table without shapes.
+</div></div>
+<div class="api" id="writeShapefile">
+<pre class="tsl sig">public fn writeShapefile(_ layer: Layer, _ path: String) -&gt; Error?</pre>
+<div class="desc">Writes <code>.shp</code>, <code>.shx</code>, <code>.dbf</code>, <code>.prj</code> and <code>.cpg</code>. Points as Point (MultiPoint when a feature has several), lines as PolyLine, polygons as Polygon, features without a shape as Null.
+</div></div>
+<h3 id="geopackage">GeoPackage</h3>
+<div class="api" id="readGeoPackage">
+<pre class="tsl sig">public fn readGeoPackage(_ path: String) -&gt; Result&lt;[Layer]&gt;</pre>
+<div class="desc">A layer for each table of features, in the order of <code>gpkg_contents</code>, each with its CRS and its columns (dates as text, booleans as 1 and 0; blob columns left out). Tiles and rasters aren't read.
+</div></div>
+<div class="api" id="writeGeoPackage">
+<pre class="tsl sig">public fn writeGeoPackage(_ layers: [Layer], _ path: String) -&gt; Error?</pre>
+<div class="desc">Several vector layers in a new GeoPackage, each a table named after the layer, in the layer's CRS. No spatial index is made (GDAL and QGIS work without one).
+</div></div>
+<h3 id="fmt-kml">KML and GPX</h3>
+<div class="api" id="readKML">
+<pre class="tsl sig">public fn readKML(_ text: String, name: String = "") -&gt; Result&lt;[Layer]&gt;</pre>
+<div class="desc">Every Placemark, in whatever Document or Folder, with the columns <code>name</code> and <code>description</code> and one for each ExtendedData value. Altitudes are dropped.
+</div></div>
+<div class="api" id="kml">
+<pre class="tsl sig">public fn kml(_ layer: Layer) -&gt; String</pre>
+<div class="desc">A Placemark for each feature, named by the column <code>name</code> if there is one, with <code>description</code> and the other columns as ExtendedData described by a Schema.
+</div></div>
+<div class="api" id="readGPX">
+<pre class="tsl sig">public fn readGPX(_ text: String, name: String = "") -&gt; Result&lt;[Layer]&gt;</pre>
+<div class="desc">Waypoints as points (columns name, ele, time, desc, sym); routes and tracks as lines (a track's segments are its parts; columns name, desc, kind and points).
+</div></div>
+<div class="api" id="gpx">
+<pre class="tsl sig">public fn gpx(_ layers: [Layer]) -&gt; String</pre>
+<div class="desc">Layers as one GPX document: points as waypoints, lines as tracks, or routes where a column <code>kind</code> says "route". Polygons are left out.
+</div></div>
+<h3 id="fmt-csv">CSV</h3>
+<div class="api" id="readCSV">
+<pre class="tsl sig">public fn readCSV(_ text: String, name: String = "", x: String = "", y: String = "", wkt: String = "",
+                  crs: geodesy.Crs = lonLat(), delimiter: String = "") -&gt; Result&lt;Layer&gt;</pre>
+<div class="desc">Delimited text (commas, semicolons, tabs or bars, found from the first lines unless <code>delimiter</code> says) as a layer of points from the fields <code>x</code> and <code>y</code>, or of shapes from the field <code>wkt</code>. With all three empty, the fields are guessed from their names (lon/lat, x/y, easting/northing, wkt/geometry, …). <code>crs</code> says what the coordinates are in.
+</div></div>
+<div class="api" id="inspectCSV">
+<pre class="tsl sig">public fn inspectCSV(_ text: String) -&gt; CsvInfo</pre>
+<div class="desc">Looks at delimited text before it's read: its delimiter, fields, which of them seem to hold coordinates, and how many rows.
+</div></div>
+<div class="api" id="CsvInfo">
+<pre class="tsl sig">public struct CsvInfo</pre>
+<div class="desc">What <code>inspectCSV</code> found.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>delimiter</code></td><td><code>String</code></td><td>"," ";" a tab or "|".</td></tr>
+<tr><td><code>fields</code></td><td><code>[String]</code></td><td>The names in the first line.</td></tr>
+<tr><td><code>xField, yField</code></td><td><code>String</code></td><td>The fields that look like x and y, or "".</td></tr>
+<tr><td><code>wktField</code></td><td><code>String</code></td><td>The field that looks like WKT, or "".</td></tr>
+<tr><td><code>rows</code></td><td><code>Int</code></td><td>Rows after the first line.</td></tr>
+</table></div>
+</div></div>
+<div class="api" id="csv">
+<pre class="tsl sig">public fn csv(_ layer: Layer) -&gt; String</pre>
+<div class="desc">The layer as CSV in its own CRS. Points get X and Y columns first (unless it already has them); other shapes go in a WKT column.
+</div></div>
+<h3 id="fmt-wkt">WKT and WKB</h3>
+<div class="api" id="geometryFromWkt">
+<pre class="tsl sig">public fn geometryFromWkt(_ text: String) -&gt; Result&lt;Geometry&gt;</pre>
+<div class="desc">A geometry from WKT ("POINT (121 14.6)", "MULTIPOLYGON (…)"), also with Z or M (dropped) and after "SRID=…;".
+</div></div>
+<div class="api" id="wkt">
+<pre class="tsl sig">public fn wkt(_ g: Geometry, decimals: Int = 17) -&gt; String</pre>
+<div class="desc">A geometry as WKT; by default with every digit, so it reads back the same.
+</div></div>
+<div class="api" id="readWKT">
+<pre class="tsl sig">public fn readWKT(_ text: String, name: String = "", crs: geodesy.Crs = lonLat()) -&gt; Result&lt;[Layer]&gt;</pre>
+<div class="desc">Text with a WKT geometry on each line (empty lines and # lines passed over). A first line starting <code>SRID=…;</code> gives the CRS.
+</div></div>
+<div class="api" id="wktLines">
+<pre class="tsl sig">public fn wktLines(_ layer: Layer) -&gt; String</pre>
+<div class="desc">Each feature's geometry as a line of WKT, in the layer's CRS. Attributes aren't written.
+</div></div>
+<div class="api" id="geometryFromWkb">
+<pre class="tsl sig">public fn geometryFromWkb(_ data: Data) -&gt; Result&lt;Geometry&gt;</pre>
+<div class="desc">A geometry from WKB, or PostGIS's EWKB.
+</div></div>
+<div class="api" id="wkb">
+<pre class="tsl sig">public fn wkb(_ g: Geometry, multi: Bool = false) -&gt; Data</pre>
+<div class="desc">A geometry as 2D WKB (little-endian). <code>multi</code> writes every shape as a MULTI… one.
+</div></div>
+</section>
+
+<section class="doc" id="rasters">
+<h2>Rasters</h2>
+<p>A raster layer has <code>kind == .raster</code>, a <a href="#Raster"><code>Raster</code></a> of values and a <a href="#RasterStyle"><code>RasterStyle</code></a> saying how it looks. A raster in another system is warped into the map's.</p>
+<pre class="tsl">if let read = cartography.readRaster("dem.tif").value() {
+    var dem = read
+    dem.rasterStyle = cartography.rampRasterStyle(dem, ramp: "Terrain")
+    dem.rasterStyle.classes = 10        // ten steps instead of a smooth ramp
+    dem.opacity = 0.75
+    m.add(cartography.hillshade(dem))
+    m.add(dem)
+}</pre>
+<h3 id="raster-files">Reading and writing</h3>
+<div class="api" id="readRaster">
+<pre class="tsl sig">public fn readRaster(_ path: String, maxCells: Int = 16_000_000) -&gt; Result&lt;Layer&gt;</pre>
+<div class="desc">GeoTIFF (<code>.tif</code>, <code>.tiff</code>), an ESRI ASCII grid (<code>.asc</code>), SRTM (<code>.hgt</code>), or a PNG/JPEG with a world file. A raster of more than <code>maxCells</code> cells is read at every n-th row and column, and its name says so.
+</div></div>
+<div class="api" id="readRasterFile">
+<pre class="tsl sig">public fn readRasterFile(_ path: String, maxCells: Int = 16_000_000) -&gt; Result&lt;RasterFile&gt;</pre>
+<div class="desc">Like <code>readRaster</code>, with the reader's notes.
+</div></div>
+<div class="api" id="RasterFile">
+<pre class="tsl sig">public struct RasterFile</pre>
+<div class="desc">A raster layer and what the reader has to say about it.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>layer</code></td><td><code>Layer</code></td><td></td></tr>
+<tr><td><code>notes</code></td><td><code>[String]</code></td><td>"read at 1/3 of its resolution", "no CRS in the file; taken to be WGS 84", …</td></tr>
+</table></div>
+</div></div>
+<div class="api" id="readGeoTIFF">
+<pre class="tsl sig">public fn readGeoTIFF(_ path: String) -&gt; Result&lt;Layer&gt;</pre>
+<div class="desc">Strips or tiles; uncompressed, LZW, Deflate or PackBits; 8, 16 or 32-bit integers or floats; any number of bands. The CRS comes from the GeoTIFF keys or a <code>.prj</code>; GDAL's no-data cells are NaN.
+</div></div>
+<div class="api" id="readAsciiGrid">
+<pre class="tsl sig">public fn readAsciiGrid(_ path: String) -&gt; Result&lt;Layer&gt;</pre>
+<div class="desc">An ESRI ASCII grid, with the CRS of the <code>.prj</code> beside it.
+</div></div>
+<div class="api" id="readHGT">
+<pre class="tsl sig">public fn readHGT(_ path: String) -&gt; Result&lt;Layer&gt;</pre>
+<div class="desc">SRTM elevations, 1201 or 3601 cells square, placed by the file's name (<code>N14E121.hgt</code>).
+</div></div>
+<div class="api" id="readWorldPicture">
+<pre class="tsl sig">public fn readWorldPicture(_ path: String) -&gt; Result&lt;Layer&gt;</pre>
+<div class="desc">A PNG or JPEG with a world file (<code>.pgw</code>, <code>.jgw</code>, <code>.wld</code>) as three bands, red, green and blue.
+</div></div>
+<div class="api" id="rasterExtensions">
+<pre class="tsl sig">public fn rasterExtensions() -&gt; [String]</pre>
+<div class="desc">The extensions <code>readRaster</code> reads.
+</div></div>
+<div class="api" id="writeGeoTIFF">
+<pre class="tsl sig">public fn writeGeoTIFF(_ layer: Layer, _ path: String, compression: String = "deflate", type: String = "float32") -&gt; Error?</pre>
+<div class="desc">Every band, in strips, with its georeferencing, no-data value and EPSG code (or the CRS as WKT in a <code>.prj</code> and <code>.aux.xml</code>). <code>compression</code>: "deflate", "lzw" or "none". <code>type</code>: "float32", "float64", "uint8", "int16", "uint16", "int32" or "uint32"; whole-number types round and clamp.
+</div></div>
+<div class="api" id="writeAsciiGrid">
+<pre class="tsl sig">public fn writeAsciiGrid(_ layer: Layer, _ path: String, band: Int = 0) -&gt; Error?</pre>
+<div class="desc">One band as an ESRI ASCII grid with a <code>.prj</code>. Empty cells get the raster's no-data value, or -9999.
+</div></div>
+<h3 id="raster-make">Making rasters</h3>
+<div class="api" id="Raster">
+<pre class="tsl sig">public struct Raster</pre>
+<div class="desc">A grid of numbers over a rectangle of the map, or a picture: <code>bands</code> of <code>width</code> × <code>height</code> values, row by row from the top left.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>width, height</code></td><td><code>Int</code></td><td></td></tr>
+<tr><td><code>bands</code></td><td><code>[[Float]]</code></td><td></td></tr>
+<tr><td><code>box</code></td><td><code>Box</code></td><td>The map coordinates of the outer edges.</td></tr>
+<tr><td><code>noData</code></td><td><code>Float</code></td><td>The value that means nothing here (NaN: none).</td></tr>
+<tr><td><code>lows, highs</code></td><td><code>[Float]</code></td><td>Each band's smallest and largest value.</td></tr>
+<tr><td><code>pixels, pixelWidth, pixelHeight, pixelBox</code></td><td><code></code></td><td>Worked out: the raster as drawn, in the map's CRS.</td></tr>
+</table></div>
+</div></div>
+<div class="api" id="makeRaster">
+<pre class="tsl sig">public fn makeRaster(width: Int, height: Int, bands: [[Float]], box: Box, noData: Float = 0.0 / 0.0) -&gt; Raster</pre>
+<div class="desc">A raster from values. Cells equal to <code>noData</code> become NaN.
+</div></div>
+<div class="api" id="rasterLayer">
+<pre class="tsl sig">public fn rasterLayer(name: String, raster: Raster, crs: geodesy.Crs) -&gt; Layer</pre>
+<div class="desc">A raster layer around a raster, with the default style.
+</div></div>
+<div class="api" id="rasterCellSize">
+<pre class="tsl sig">public fn rasterCellSize(_ r: Raster) -&gt; (Float, Float)</pre>
+<div class="desc">The size of a cell (width, height) in the layer's units.
+</div></div>
+<h3 id="raster-style">How rasters look</h3>
+<div class="api" id="RasterStyle">
+<pre class="tsl sig">public struct RasterStyle</pre>
+<div class="desc">How a raster layer is drawn.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>look</code></td><td><code>RasterLook</code></td><td><code>.gray</code>, <code>.ramp</code>, <code>.hillshade</code> or <code>.rgb</code>.</td></tr>
+<tr><td><code>band</code></td><td><code>Int</code></td><td>The band shown in gray, along a ramp or as hills (from 0).</td></tr>
+<tr><td><code>redBand, greenBand, blueBand</code></td><td><code>Int</code></td><td>The bands of an RGB picture. Default 0, 1, 2.</td></tr>
+<tr><td><code>ramp</code></td><td><code>String</code></td><td>One of <code>rampNames()</code>. Default "Terrain".</td></tr>
+<tr><td><code>low, high</code></td><td><code>Float</code></td><td>The values at the two ends of the gray scale or ramp.</td></tr>
+<tr><td><code>azimuth, altitude, exaggeration</code></td><td><code>Float</code></td><td>Hillshade: where the sun is (degrees) and how tall the land is drawn.</td></tr>
+<tr><td><code>classes</code></td><td><code>Int</code></td><td>Colors in this many steps (0: smoothly).</td></tr>
+<tr><td><code>gamma</code></td><td><code>Float</code></td><td>Brings out low values (above 1) or high ones (below 1).</td></tr>
+<tr><td><code>invert</code></td><td><code>Bool</code></td><td>The colors the other way around.</td></tr>
+<tr><td><code>colors</code></td><td><code>[Rgba]</code></td><td>Colors of your own for the ramp look, lowest to highest.</td></tr>
+</table></div>
+</div></div>
+<div class="api" id="RasterLook">
+<pre class="tsl sig">public enum RasterLook { gray, ramp, hillshade, rgb }</pre>
+<div class="desc">How a raster is colored.
+</div></div>
+<div class="api" id="defaultRasterStyle">
+<pre class="tsl sig">public fn defaultRasterStyle(_ layer: Layer) -&gt; RasterStyle</pre>
+<div class="desc">A color picture for three or four bands of 0 to 255; otherwise the first band in gray, from its 2nd to its 98th percentile.
+</div></div>
+<div class="api" id="rampRasterStyle">
+<pre class="tsl sig">public fn rampRasterStyle(_ layer: Layer, ramp: String = "Terrain", band: Int = 0) -&gt; RasterStyle</pre>
+<div class="desc">A ramp from the band's smallest value to its largest.
+</div></div>
+<div class="api" id="rasterColors">
+<pre class="tsl sig">public fn rasterColors(_ style: RasterStyle) -&gt; [Int]</pre>
+<div class="desc">The 256 colors a style gives from its <code>low</code> to its <code>high</code>, for legends.
+</div></div>
+<div class="api" id="renderRaster">
+<pre class="tsl sig">public fn renderRaster(_ layer: Layer, _ crs: geodesy.Crs) -&gt; Raster</pre>
+<div class="desc">The layer's raster with its pixels made for a map in <code>crs</code>, colored by its style and warped if needed; at most 2048 pixels on a side. Maps do this for you.
+</div></div>
+<div class="api" id="boxInCrs">
+<pre class="tsl sig">public fn boxInCrs(_ box: Box, from: geodesy.Crs, to: geodesy.Crs) -&gt; Box</pre>
+<div class="desc">The box around a box of one CRS in another (its edges bend, so points along them are taken too).
+</div></div>
+</section>
+
+<section class="doc" id="terrain">
+<h2>Terrain</h2>
+<p>These work on a layer of elevations in meters, also when its cells are in degrees. Hillshade, slope and aspect follow gdaldem (Horn's method, with <code>-compute_edges</code>).</p>
+<div class="api" id="hillshade">
+<pre class="tsl sig">public fn hillshade(_ layer: Layer, azimuth: Float = 315.0, altitude: Float = 45.0, exaggeration: Float = 1.0, band: Int = 0) -&gt; Layer</pre>
+<div class="desc">Shaded relief: a new raster layer from 0 (dark) to 255 (lit), with the sun at <code>azimuth</code> degrees clockwise from north and <code>altitude</code> degrees above the horizon.
+</div></div>
+<div class="api" id="slope">
+<pre class="tsl sig">public fn slope(_ layer: Layer, band: Int = 0) -&gt; Layer</pre>
+<div class="desc">How steep each cell is, in degrees (0: flat).
+</div></div>
+<div class="api" id="aspect">
+<pre class="tsl sig">public fn aspect(_ layer: Layer, band: Int = 0) -&gt; Layer</pre>
+<div class="desc">Which way each cell faces: the direction downhill in degrees clockwise from north, -1 for a flat cell.
+</div></div>
+<div class="api" id="contours">
+<pre class="tsl sig">public fn contours(_ source: Layer, interval: Float, base: Float = 0.0, band: Int = 0, name: String = "") -&gt; Layer</pre>
+<div class="desc">Contour lines as a line layer in the raster's CRS, with a number column <code>elev</code>: one feature for each line, at <code>base</code> ± multiples of <code>interval</code>. Closed lines end with their first point; open ones run edge to edge. At most 5000 levels.
+</div></div>
+</section>
+
+<section class="doc" id="raster-values">
+<h2>Raster values</h2>
+<div class="api" id="rasterValue">
+<pre class="tsl sig">public fn rasterValue(_ layer: Layer, _ x: Float, _ y: Float, band: Int = 0) -&gt; Float</pre>
+<div class="desc">The value of the cell a point (in the layer's CRS) is in; NaN outside or where there's no value.
+</div></div>
+<div class="api" id="rasterValues">
+<pre class="tsl sig">public fn rasterValues(_ layer: Layer, _ x: Float, _ y: Float) -&gt; [Float]</pre>
+<div class="desc">Every band's value at a point: empty outside the raster.
+</div></div>
+<div class="api" id="sampleRaster">
+<pre class="tsl sig">public fn sampleRaster(_ r: Raster, points: [Float], band: Int = 0) -&gt; [Float]</pre>
+<div class="desc">Values at many points (<code>[x, y, x, y, …]</code>), for profiles and samples.
+</div></div>
+<div class="api" id="rasterStatistics">
+<pre class="tsl sig">public fn rasterStatistics(_ r: Raster, band: Int = 0) -&gt; RasterStats</pre>
+<div class="desc">Count, min, max, mean, standard deviation and sum of a band's cells with a value.
+</div></div>
+<div class="api" id="rasterHistogram">
+<pre class="tsl sig">public fn rasterHistogram(_ r: Raster, band: Int = 0, bins: Int = 256, low: Float = 0.0 / 0.0, high: Float = 0.0 / 0.0) -&gt; [Int]</pre>
+<div class="desc">How many cells fall in each of <code>bins</code> equal steps from <code>low</code> to <code>high</code> (by default the band's range).
+</div></div>
+<div class="api" id="zonalStatistics">
+<pre class="tsl sig">public fn zonalStatistics(_ r: Raster, zones: [Geometry], band: Int = 0) -&gt; [RasterStats]</pre>
+<div class="desc">For each polygon (in the raster's CRS), the statistics of the cells whose centers are inside it, holes left out.
+</div></div>
+<div class="api" id="RasterStats">
+<pre class="tsl sig">public struct RasterStats</pre>
+<div class="desc">What a set of cells' values are like. With no cells, <code>count</code> is 0 and the rest NaN.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>count</code></td><td><code>Int</code></td><td>Cells with a value.</td></tr>
+<tr><td><code>min, max, mean</code></td><td><code>Float</code></td><td></td></tr>
+<tr><td><code>stddev</code></td><td><code>Float</code></td><td>Of these cells (not a sample estimate).</td></tr>
+<tr><td><code>sum</code></td><td><code>Float</code></td><td></td></tr>
+</table></div>
+</div></div>
+</section>
+
+<section class="doc" id="tiles">
+<h2>Basemap tiles</h2>
+<p>A tile layer has <code>kind == .tiles</code> and a <code>urlTemplate</code>. In a map not in Web Mercator its tiles are warped to fit. Each source carries its attribution, which the map shows in the corner.</p>
+<p>Tiles download a few at a time with a User-Agent, are kept on disk (<code>Map.tileFolder</code>), and are asked for again after a week. OpenStreetMap's servers are for light use; a busy app should use its own tile server or a paid service.</p>
+<pre class="tsl">m.add(cartography.openStreetMap())
+if let s = cartography.tileSource(named: "Esri World Imagery") {
+    m.add(cartography.tileLayer(s))
+}
+m.add(cartography.xyzLayer(url: "https://tiles.example.com/{z}/{x}/{y}.png", name: "Ours",
+    attribution: "© Us", maxZoom: 18))
+m.add(cartography.wmsLayer(service: "https://example.com/geoserver/wms", layers: "roads,rivers"))</pre>
+<div class="api" id="openStreetMap">
+<pre class="tsl sig">public fn openStreetMap() -&gt; Layer</pre>
+<div class="desc">OpenStreetMap's standard map.
+</div></div>
+<div class="api" id="tileSources">
+<pre class="tsl sig">public fn tileSources() -&gt; [TileSource]</pre>
+<div class="desc">Basemaps anyone may use without a key: <code>OpenStreetMap</code>, <code>OpenStreetMap HOT</code>, <code>OpenTopoMap</code>, <code>CARTO Positron</code>, <code>CARTO Dark Matter</code>, <code>CARTO Voyager</code>, <code>Esri World Imagery</code>, <code>Esri World Street Map</code>, <code>Esri World Topo Map</code>, <code>USGS Topo</code>, <code>USGS Imagery</code>. Their terms still apply.
+</div></div>
+<div class="api" id="tileSource">
+<pre class="tsl sig">public fn tileSource(named: String) -&gt; TileSource?</pre>
+<div class="desc">The source of that name (whatever its capitals), or nil.
+</div></div>
+<div class="api" id="tileLayer">
+<pre class="tsl sig">public fn tileLayer(_ s: TileSource) -&gt; Layer</pre>
+<div class="desc">A tile layer of a source's tiles, ready for <code>Map.add</code>.
+</div></div>
+<div class="api" id="TileSource">
+<pre class="tsl sig">public struct TileSource</pre>
+<div class="desc">Where a basemap's tiles come from.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>name</code></td><td><code>String</code></td><td></td></tr>
+<tr><td><code>url</code></td><td><code>String</code></td><td>The address; see <code>tileUrl</code>.</td></tr>
+<tr><td><code>minZoom, maxZoom</code></td><td><code>Int</code></td><td></td></tr>
+<tr><td><code>attribution</code></td><td><code>String</code></td><td>The credit the map must show.</td></tr>
+</table></div>
+</div></div>
+<div class="api" id="xyzLayer">
+<pre class="tsl sig">public fn xyzLayer(url: String, name: String = "Tiles", attribution: String = "", minZoom: Int = 0, maxZoom: Int = 19) -&gt; Layer</pre>
+<div class="desc">A tile layer of any XYZ server. Give the credit its provider asks for.
+</div></div>
+<div class="api" id="wmsLayer">
+<pre class="tsl sig">public fn wmsLayer(service: String, layers: String, name: String = "", attribution: String = "", styles: String = "", format: String = "image/png", version: String = "1.1.1", transparent: Bool = true, minZoom: Int = 0, maxZoom: Int = 20) -&gt; Layer</pre>
+<div class="desc">A tile layer of a WMS's layers (comma-separated names), as GeoServer, MapServer and QGIS Server give.
+</div></div>
+<div class="api" id="wmsTemplate">
+<pre class="tsl sig">public fn wmsTemplate(service: String, layers: String, styles: String = "", format: String = "image/png", version: String = "1.1.1", transparent: Bool = true) -&gt; String</pre>
+<div class="desc">The address of a WMS's tiles: GetMap requests for 256-pixel squares in Web Mercator.
+</div></div>
+<div class="api" id="wmsLayerNames">
+<pre class="tsl sig">public fn wmsLayerNames(_ capabilities: String) -&gt; [(String, String)]</pre>
+<div class="desc">The layers a WMS has (name and title), from the text of its GetCapabilities answer.
+</div></div>
+<div class="api" id="tileUrl">
+<pre class="tsl sig">public fn tileUrl(_ template: String, _ t: Tile) -&gt; String</pre>
+<div class="desc">A tile's address: <code>{z}</code>, <code>{x}</code>, <code>{y}</code>; <code>{-y}</code> (TMS rows); <code>{s}</code> (a, b or c); <code>{q}</code> (quadkey); <code>{bbox}</code> (the tile's box in Web Mercator); <code>{r}</code> (nothing).
+</div></div>
+</section>
+
+<section class="doc" id="tile-fetch">
+<h2>Downloading tiles</h2>
+<p><code>MapView</code> does all of this. For your own Canvas, see <a href="#canvas">Your own Canvas</a>.</p>
+<div class="api" id="fetchTiles">
+<pre class="tsl sig">public fn fetchTiles(_ m: Map, parallel: Int = 4, limit: Int = 64, userAgent: String = "", arrived: fn(String, Bool)? = nil, done: fn([String])) -&gt; [String]</pre>
+<div class="desc">Downloads the tiles a map shows that aren't on disk yet, <code>parallel</code> at a time (never more than six in all). Returns the files it's getting, for the caller's <code>Map.loading</code>. <code>arrived</code> gets each file as it ends and whether it worked; <code>done</code> gets them all.
+</div></div>
+<div class="api" id="warpTileLayers">
+<pre class="tsl sig">public fn warpTileLayers(_ m: bind Map, density: Float = 1.0, smooth: Bool = false) -&gt; Bool</pre>
+<div class="desc">Warps every visible tile layer into the map's system; in Web Mercator it empties them. Returns whether any picture changed.
+</div></div>
+<div class="api" id="warpTiles">
+<pre class="tsl sig">public fn warpTiles(_ m: Map, _ layer: Layer, density: Float = 1.0, maxSize: Int = 2048, smooth: Bool = false) -&gt; Raster</pre>
+<div class="desc">One tile layer warped into the map's system, about one pixel to a point. <code>smooth</code> blends the four nearest tile pixels.
+</div></div>
+<div class="api" id="tilesToFetch">
+<pre class="tsl sig">public fn tilesToFetch(_ m: Map, limit: Int = 64, maxAge: Float = 604800.0) -&gt; [TileFetch]</pre>
+<div class="desc">The tiles still to get, nearest the middle first: not those loading, nor those that failed in the last ten minutes. Tiles older than <code>maxAge</code> seconds are asked for again.
+</div></div>
+<div class="api" id="fetchTile">
+<pre class="tsl sig">public fn fetchTile(_ f: TileFetch, userAgent: String = "", done: fn(Bool))</pre>
+<div class="desc">Downloads one tile into its file. The other half of <code>fetchTiles</code>, for downloading your own way.
+</div></div>
+<div class="api" id="TileFetch">
+<pre class="tsl sig">public struct TileFetch</pre>
+<div class="desc">One tile to download.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>url</code></td><td><code>String</code></td><td></td></tr>
+<tr><td><code>path</code></td><td><code>String</code></td><td>The file it goes to.</td></tr>
+<tr><td><code>layer</code></td><td><code>Int</code></td><td>Its layer's place in <code>Map.layers</code>.</td></tr>
+<tr><td><code>tile</code></td><td><code>Tile</code></td><td></td></tr>
+</table></div>
+</div></div>
+<div class="api" id="tileUserAgent">
+<pre class="tsl sig">public fn tileUserAgent() -&gt; String</pre>
+<div class="desc">The User-Agent sent unless you pass your app's own to <code>fetchTiles(userAgent:)</code>.
+</div></div>
+<div class="api" id="clearTileCache">
+<pre class="tsl sig">public fn clearTileCache(_ m: Map, source: String = "") -&gt; Int</pre>
+<div class="desc">Deletes downloaded tiles of one source address, or of all when "". Returns how many files went.
+</div></div>
+<div class="api" id="tileCacheFolder">
+<pre class="tsl sig">public fn tileCacheFolder(_ m: Map) -&gt; String</pre>
+<div class="desc">The folder tiles are kept in.
+</div></div>
+<div class="api" id="tileFolderFor">
+<pre class="tsl sig">public fn tileFolderFor(_ m: Map, _ layer: Layer) -&gt; String</pre>
+<div class="desc">A tile layer's own folder in the cache.
+</div></div>
+<div class="api" id="tilePath">
+<pre class="tsl sig">public fn tilePath(_ m: Map, _ layer: Layer, _ t: Tile) -&gt; String</pre>
+<div class="desc">The file a tile is kept in.
+</div></div>
+<div class="api" id="tileSourceKey">
+<pre class="tsl sig">public fn tileSourceKey(_ url: String) -&gt; String</pre>
+<div class="desc">A short, safe folder name for a tile address.
+</div></div>
+<div class="api" id="tileFailedRecently">
+<pre class="tsl sig">public fn tileFailedRecently(_ path: String, seconds: Float = 600.0) -&gt; Bool</pre>
+<div class="desc">Did asking for this tile fail less than <code>seconds</code> ago?
+</div></div>
+</section>
+
+<section class="doc" id="tile-math">
+<h2>Tile numbers</h2>
+<div class="api" id="Tile">
+<pre class="tsl sig">public struct Tile</pre>
+<div class="desc">One tile of the Web Mercator grid.
+<div class="table"><table><tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>z</code></td><td><code>Int</code></td><td>Zoom.</td></tr>
+<tr><td><code>x</code></td><td><code>Int</code></td><td>Column from the left, 0 to 2^z − 1.</td></tr>
+<tr><td><code>y</code></td><td><code>Int</code></td><td>Row from the top.</td></tr>
+<tr><td><code>column</code></td><td><code>Int</code></td><td>Where it's drawn: <code>x</code>, or a world further left or right across the 180° meridian.</td></tr>
+</table></div>
+</div></div>
+<div class="table methods"><table><tr><th>Method</th><th>Does</th></tr>
+<tr><td><code>key() -&gt; String</code></td><td>"z/x/y".</td></tr>
+<tr><td><code>box() -&gt; Box</code></td><td>The part of the map it covers, in Web Mercator.</td></tr>
+<tr><td><code>parent() -&gt; Tile</code></td><td>The tile one zoom out.</td></tr>
+<tr><td><code>ancestor(_ levels: Int) -&gt; Tile</code></td><td>The tile <code>levels</code> zooms out.</td></tr>
+<tr><td><code>children() -&gt; [Tile]</code></td><td>The four tiles one zoom in.</td></tr>
+<tr><td><code>tmsY() -&gt; Int</code></td><td>The row from the bottom, as TMS numbers them.</td></tr>
+<tr><td><code>quadkey() -&gt; String</code></td><td>Bing's name for the tile.</td></tr>
+</table></div>
+<div class="api" id="tileAt">
+<pre class="tsl sig">public fn tileAt(lon: Float, lat: Float, zoom: Int) -&gt; Tile</pre>
+<div class="desc">The tile with a place in it.
+</div></div>
+<div class="api" id="tileUnits">
+<pre class="tsl sig">public fn tileUnits(lon: Float, lat: Float, zoom: Int) -&gt; (Float, Float)</pre>
+<div class="desc">Where a place is on the tiles of a zoom, in tiles from the top left of the world.
+</div></div>
+<div class="api" id="tileUnitsOf">
+<pre class="tsl sig">public fn tileUnitsOf(x: Float, y: Float, zoom: Int) -&gt; (Float, Float)</pre>
+<div class="desc">The same for a Web Mercator point.
+</div></div>
+<div class="api" id="tileCount">
+<pre class="tsl sig">public fn tileCount(_ z: Int) -&gt; Float</pre>
+<div class="desc">How many tiles across the world is (2^z).
+</div></div>
+<div class="api" id="tileWorldHalf">
+<pre class="tsl sig">public fn tileWorldHalf() -&gt; Float</pre>
+<div class="desc">Half the width of the Web Mercator world in meters.
+</div></div>
+<div class="api" id="tilesIn">
+<pre class="tsl sig">public fn tilesIn(_ box: Box, zoom: Int, limit: Int = 400) -&gt; [Tile]</pre>
+<div class="desc">The tiles that touch a Web Mercator box, row by row; none if more than <code>limit</code>.
+</div></div>
+<div class="api" id="tileZoomFor">
+<pre class="tsl sig">public fn tileZoomFor(metersPerPoint: Float, minZoom: Int = 0, maxZoom: Int = 19) -&gt; Int</pre>
+<div class="desc">The zoom whose pixels come closest to one point each.
+</div></div>
+<div class="api" id="tileZoom">
+<pre class="tsl sig">public fn tileZoom(_ m: Map, _ layer: Layer) -&gt; Int</pre>
+<div class="desc">The zoom of a tile layer for what a map shows now.
+</div></div>
+<div class="api" id="tilesFor">
+<pre class="tsl sig">public fn tilesFor(_ m: Map, layer: Layer, limit: Int = 64) -&gt; [Tile]</pre>
+<div class="desc">The tiles of a layer that cover what a map shows.
+</div></div>
+<div class="api" id="isWebMercator">
+<pre class="tsl sig">public fn isWebMercator(_ crs: geodesy.Crs) -&gt; Bool</pre>
+<div class="desc">Is a system Web Mercator?
+</div></div>
+</section>
+
+<section class="doc" id="crs">
+<h2>Coordinate systems</h2>
+<p>Systems are <code>geodesy.Crs</code> values: anything geodesy knows, from an EPSG code, a PROJ string or WKT.</p>
+<pre class="tsl">let utm = geodesy.epsg(32651) ?? cartography.webMercator()     // UTM zone 51N
+let lcc = geodesy.crs("+proj=lcc +lat_1=14 +lat_2=16 +lon_0=121 +datum=WGS84")
+var m = cartography.Map(crs: utm)
+m.setCrs(cartography.lonLat())                                  // later, in degrees</pre>
+<div class="api" id="webMercator">
+<pre class="tsl sig">public fn webMercator() -&gt; geodesy.Crs</pre>
+<div class="desc">Web Mercator (EPSG:3857), the system of web basemaps and a map's default.
+</div></div>
+<div class="api" id="lonLat">
+<pre class="tsl sig">public fn lonLat() -&gt; geodesy.Crs</pre>
+<div class="desc">Longitude and latitude on WGS 84 (EPSG:4326), the system of GeoJSON, KML and GPX.
+</div></div>
+<div class="api" id="sameCrs">
+<pre class="tsl sig">public fn sameCrs(_ a: geodesy.Crs, _ b: geodesy.Crs) -&gt; Bool</pre>
+<div class="desc">Do two systems put every point in the same place, names aside?
+</div></div>
+<div class="api" id="transformCoords">
+<pre class="tsl sig">public fn transformCoords(from: geodesy.Crs, to: geodesy.Crs, coords: [Float]) -&gt; [Float]</pre>
+<div class="desc">Coordinates <code>[x, y, x, y, …]</code> from one system to another.
+</div></div>
+<div class="api" id="reprojected">
+<pre class="tsl sig">public fn reprojected(_ g: Geometry, from: geodesy.Crs, to: geodesy.Crs) -&gt; Geometry</pre>
+<div class="desc">A shape with its points taken to another system.
+</div></div>
+<div class="api" id="metersPerUnit">
+<pre class="tsl sig">public fn metersPerUnit(_ crs: geodesy.Crs, lat: Float) -&gt; Float</pre>
+<div class="desc">How many meters one unit of a system is at latitude <code>lat</code>.
+</div></div>
+<div class="api" id="powerOfTen">
+<pre class="tsl sig">public fn powerOfTen(_ n: Int) -&gt; Float</pre>
+<div class="desc">10 to a whole power, exactly where a Float can be.
+</div></div>
+</section>
+
+    <p class="doc-foot">Missing something, or found a mistake? <a href="https://github.com/alexiusacademia/cartography/issues">Open an issue on GitHub</a>.</p>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>cartography · MIT licence · © 2026 <a href="https://syncster.dev" rel="author">Alexius Academia</a> · <a href="mailto:admin@syncster.dev">admin@syncster.dev</a> · <a href="https://syncster.dev">syncster.dev</a></span>
+    <nav>
+      <a href="https://github.com/alexiusacademia/cartography">GitHub</a>
+      <a href="https://tessel-lang.syncster.dev">Tessel</a>
+      <a href="https://tessel-packages.syncster.dev">Libraries</a>
+      <a href="https://geodesy-package.syncster.dev">geodesy</a>
+      <a href="https://viewport-package.syncster.dev">viewport</a>
+    </nav>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

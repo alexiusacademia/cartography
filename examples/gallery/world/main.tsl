@@ -1,0 +1,55 @@
+// cartography gallery: "world", one of the programs on the website's
+// examples page. Check it with `tessel check examples/gallery/world`.
+//
+// Author: Alexius Academia
+// Date: 2026-11-22
+
+import "../../.."
+import geodesy
+
+fn layerOf(_ path: String) -> cartography.Layer {
+    match cartography.readLayers(path) {
+        .ok(layers) -> layers[0]
+        .failure(e) -> {
+            print(e.message)
+            exit(1)
+            cartography.Layer()
+        }
+    }
+}
+
+fn main() {
+    // Equal Earth (EPSG:8857), on a pale blue sea.
+    var m = cartography.Map(crs: geodesy.epsg(8857) ?? cartography.lonLat(), background: .rgb(214, 232, 245))
+
+    // Countries: a color for each continent, with white borders.
+    var countries = layerOf("countries.geojson")
+    countries.style = cartography.categorizedStyle(layer: countries, field: "CONTINENT")
+    for i in 0..countries.style.classes.count {
+        countries.style.classes[i].symbol.stroke = cartography.rgb(255, 255, 255)
+        countries.style.classes[i].symbol.strokeWidth = 0.5
+    }
+    m.add(countries)
+
+    var rivers = layerOf("rivers.geojson")
+    rivers.style.symbol = cartography.Symbol(stroke: cartography.rgb(70, 130, 200), strokeWidth: 1.0)
+    m.add(rivers)
+
+    // Only the cities of eight million people or more.
+    var places = layerOf("places.geojson")
+    let pop = places.columnIndex("POP_MAX") ?? 0
+    places.hidden = places.columns[pop].nums.map { p in p < 8000000.0 }
+    places.style.symbol = cartography.Symbol(fill: cartography.rgb(40, 40, 40), stroke: cartography.rgb(255, 255, 255), size: 5)
+    places.labels = cartography.LabelStyle(enabled: true, field: "NAME", size: 10)
+    m.add(places)
+
+    m.vp.resize(1000, 520)
+    m.vp.smooth = false
+    m.fitAll()
+    let ok = renderImage(path: "world.png", width: 1000, height: 520, scale: 2) { g in
+        m.draw(g)
+        let _size = cartography.drawLegend(g, m, x: 12, y: 12)
+        cartography.drawMapScaleBar(g, m, x: 16, y: 504)
+    }
+    print("world.png: {ok}")
+}
