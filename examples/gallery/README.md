@@ -19,8 +19,8 @@ They read their files from the folder they're run in:
 - `countries.geojson`, `rivers.geojson`, `places.geojson`: `examples/data`
 - `dem.tif`: `tests/data/raster`
 - `gauges.csv`: in `csv-points/`
-- `lots.shp`, `zones.gpkg`, `hike.gpx`, `buildings.gpkg`, `parcels.gpkg`:
-  your own files
+- `hike.gpx` (a made-up loop trail near Tanay, Rizal): in `gpx-track/`
+- `lots.shp`, `zones.gpkg`: your own files
 
 | Folder | Kind | Shows |
 |---|---|---|
@@ -28,7 +28,7 @@ They read their files from the folder they're run in:
 | `find-places` | app | Filtering a layer with `hidden`, clicking features |
 | `gpx-track` | app | GPX, arrows along a line, swapping basemaps |
 | `utm` | app | A map in UTM, `setCrs`, eastings and northings |
-| `own-canvas` | app | A Canvas instead of MapView, `fetchTiles`, `featuresIn` |
+| `own-canvas` | app | A Canvas instead of MapView, `fetchTiles`, `featuresIn` (on `places.geojson`) |
 | `world` | picture | Equal Earth, a categorized style, `renderImage` |
 | `choropleth` | picture | A graduated style by natural breaks |
 | `terrain` | picture | Hillshade, a ramp and labeled contours |

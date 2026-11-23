@@ -8,7 +8,7 @@ import "../../.."
 
 fn startingMap() -> cartography.Map {
     var m = cartography.Map()
-    m.add(cartography.tileLayer(cartography.tileSource(named: "CARTO Positron") ?? cartography.tileSources()[0]))
+    m.add(cartography.openStreetMap())
     if let layers = cartography.readLayers("places.geojson").value() {
         var places = layers[0]
         places.style.symbol = cartography.Symbol(fill: cartography.rgb(21, 128, 61), size: 7)

@@ -253,7 +253,7 @@ test "keyless sources, each with its credit" {
         expect(s.url.contains("\{z}") && s.url.contains("\{x}") && s.url.contains("\{y}"), s.name)
         expect(!s.url.lowercase().contains("key") && !s.url.contains("token"), s.name)
         expect(s.maxZoom > s.minZoom)
-        if s.url.contains("openstreetmap") || s.url.contains("cartocdn") || s.url.contains("opentopomap") {
+        if s.url.contains("openstreetmap") || s.url.contains("opentopomap") {
             expect(s.attribution.contains("© OpenStreetMap contributors"), s.name)
         }
     }

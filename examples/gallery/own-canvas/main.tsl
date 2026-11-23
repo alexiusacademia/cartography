@@ -13,7 +13,7 @@ import viewport
 fn startingMap() -> cartography.Map {
     var m = cartography.Map()
     m.add(cartography.openStreetMap())
-    if let layers = cartography.readLayers("buildings.gpkg").value() {
+    if let layers = cartography.readLayers("places.geojson").value() {
         for layer in layers {
             m.add(layer)
         }

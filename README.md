@@ -188,8 +188,7 @@ if let read = cartography.readRaster("dem.tif").value() {
 - **Sources:**
   - `openStreetMap()`;
   - `tileLayer(s)` for any of `tileSources()`: OSM, OSM Humanitarian,
-    OpenTopoMap, CARTO Positron, Dark Matter and Voyager, Esri imagery,
-    street and topo, and USGS;
+    OpenTopoMap, Esri imagery, street and topo, and USGS;
   - `xyzLayer(url:…)` for any `{z}/{x}/{y}` address;
   - `wmsLayer(service:layers:)` for WMS.
 - **Attribution:** each layer carries its source's attribution, and the map

@@ -15,6 +15,7 @@ site.js                # code colors, copy buttons, the docs' filter and side me
 styles.css             # the other libraries' design, in green
 assets/*.png           # the pictures `tessel run examples/pictures` draws (copied from ../docs)
 assets/gauges.jpg      # the picture of the CSV example on examples.html
+assets/app-*.jpg       # screenshots of the gallery's five apps as they open (macOS)
 assets/share.png       # world.png cropped to 1981 x 1040 and scaled to 1200 x 630
 assets/favicon.svg
 netlify.toml           # no build; HTML isn't cached

@@ -73,8 +73,8 @@
       <p class="lede">12 programs that use cartography, from a first map to terrain analysis. Each one passes <code>tessel check</code>, and the ones that draw or print were run to make what's shown here.</p>
       <div class="howto">
         <p><b>To run one:</b> make a project with <code>tessel new maps</code>, then <code>tessel add cartography</code> in it. Put the program in <code>main.tsl</code> and run <code>tessel run .</code>. Examples that call <code>geodesy</code> or <code>viewport</code> themselves also need <code>tessel add geodesy</code> or <code>tessel add viewport</code>.</p>
-        <p><b>Data:</b> <code>countries.geojson</code>, <code>rivers.geojson</code> and <code>places.geojson</code> are in the library's <a href="https://github.com/alexiusacademia/cartography/tree/main/examples/data"><code>examples/data</code></a> (from Natural Earth); <code>dem.tif</code> is in <a href="https://github.com/alexiusacademia/cartography/tree/main/tests/data/raster"><code>tests/data/raster</code></a>. For the others, use files of your own.</p>
-        <p><b>In the repository:</b> each program is in <a href="https://github.com/alexiusacademia/cartography/tree/main/examples/gallery"><code>examples/gallery</code></a>, in a folder of its own.</p>
+        <p><b>Data:</b> <code>countries.geojson</code>, <code>rivers.geojson</code> and <code>places.geojson</code> are in the library's <a href="https://github.com/alexiusacademia/cartography/tree/main/examples/data"><code>examples/data</code></a> (from Natural Earth); <code>dem.tif</code> is in <a href="https://github.com/alexiusacademia/cartography/tree/main/tests/data/raster"><code>tests/data/raster</code></a>; <code>hike.gpx</code> (a made-up trail) and <code>gauges.csv</code> are beside their programs. For <code>lots.shp</code> and <code>zones.gpkg</code>, use files of your own.</p>
+        <p><b>In the repository:</b> each program is in <a href="https://github.com/alexiusacademia/cartography/tree/main/examples/gallery"><code>examples/gallery</code></a>, in a folder of its own. The screenshots are the apps as they open, on macOS.</p>
       </div>
     </header>
 
@@ -87,9 +87,9 @@
 <p>OpenStreetMap in a window, with two towns made in code as red stars with their names. MapView pans, zooms, downloads tiles and draws the scale bar and north arrow.</p>
 <div class="tags"><span>MapView</span><span>openStreetMap</span><span>Layer</span><span>Symbol</span><span>LabelStyle</span></div>
 </div>
-<figure class="shot"><img src="assets/basemap.png" width="1600" height="1000" loading="lazy" alt="OpenStreetMap under Luzon with towns marked by red stars"><figcaption>A map like it, drawn by the library&rsquo;s examples/pictures</figcaption></figure>
+<figure class="shot"><img src="assets/app-first-map.jpg" width="1400" height="1099" loading="lazy" alt="The First map window: OpenStreetMap over central Luzon with Baguio and Manila as red stars, zoom buttons, a north arrow and a scale bar"><figcaption>The app when it opens</figcaption></figure>
 </div>
-<div class="code-wrap"><div class="code-bar"><span>first-map.tsl</span><span>an app · 25 lines</span></div>
+<div class="code-wrap"><div class="code-bar"><span>examples/gallery/first-map/main.tsl</span><span>an app · 25 lines</span></div>
 <pre class="tsl">import cartography
 
 // A layer of points made in code: two towns, as red stars with their names.
@@ -121,16 +121,17 @@ app FirstMap(title: "First map", width: 800, height: 600) {
 <div class="program-head">
 <div>
 <h3><a href="#find-places">Find places by name</a></h3>
-<p>A search box filters a layer: features whose names don't match go into <code>hidden</code>, which leaves them out of the drawing and of clicks. Clicking a place shows its name and country. On CARTO Positron tiles.</p>
-<div class="tags"><span>hidden</span><span>refresh</span><span>fitLayer</span><span>attributes</span><span>tileSource</span></div>
+<p>A search box filters a layer: features whose names don't match go into <code>hidden</code>, which leaves them out of the drawing and of clicks. Clicking a place shows its name and country.</p>
+<div class="tags"><span>hidden</span><span>refresh</span><span>fitLayer</span><span>attributes</span><span>shownCount</span></div>
 </div>
+<figure class="shot"><img src="assets/app-find-places.jpg" width="1400" height="1008" loading="lazy" alt="The Find places window: a search box over a world map of capital cities on OpenStreetMap"><figcaption>The app when it opens</figcaption></figure>
 </div>
-<div class="code-wrap"><div class="code-bar"><span>find-places.tsl</span><span>an app · 51 lines</span></div>
+<div class="code-wrap"><div class="code-bar"><span>examples/gallery/find-places/main.tsl</span><span>an app · 51 lines</span></div>
 <pre class="tsl">import cartography
 
 fn startingMap() -&gt; cartography.Map {
     var m = cartography.Map()
-    m.add(cartography.tileLayer(cartography.tileSource(named: "CARTO Positron") ?? cartography.tileSources()[0]))
+    m.add(cartography.openStreetMap())
     if let layers = cartography.readLayers("places.geojson").value() {
         var places = layers[0]
         places.style.symbol = cartography.Symbol(fill: cartography.rgb(21, 128, 61), size: 7)
@@ -186,8 +187,9 @@ app FindPlaces(title: "Find places", width: 900, height: 620) {
 <p>Reads a GPX file's track and waypoints. The track is a cased line with arrows along it showing which way it goes; the waypoints are labeled to their right. A menu swaps the basemap at the bottom of the map.</p>
 <div class="tags"><span>readLayers</span><span>GPX</span><span>markerLine</span><span>insert</span><span>remove</span><span>onMouse</span></div>
 </div>
+<figure class="shot"><img src="assets/app-gpx-track.jpg" width="1400" height="1019" loading="lazy" alt="The Hike window: a red loop trail with arrows along it over OpenTopoMap, waypoints labeled, a basemap menu and a legend"><figcaption>The app when it opens</figcaption></figure>
 </div>
-<div class="code-wrap"><div class="code-bar"><span>gpx-track.tsl</span><span>an app · 53 lines</span></div>
+<div class="code-wrap"><div class="code-bar"><span>examples/gallery/gpx-track/main.tsl</span><span>an app · 53 lines</span></div>
 <pre class="tsl">import cartography
 
 // A GPX track over a choice of basemaps, its direction shown by arrows
@@ -250,8 +252,9 @@ app Hike(title: "Hike", width: 1000, height: 700) {
 <p>The same OpenStreetMap tiles, warped into UTM zone 51N. The scale is measured on the ground, the mouse shows eastings and northings, and buttons redraw the map in other systems without losing its place.</p>
 <div class="tags"><span>geodesy.epsg</span><span>setCrs</span><span>transformCoords</span><span>scaleDenominator</span></div>
 </div>
+<figure class="shot"><img src="assets/app-utm.jpg" width="1400" height="1039" loading="lazy" alt="The UTM window: OpenStreetMap over Manila warped into UTM zone 51N at 1:49,991, with buttons for other systems"><figcaption>The app when it opens</figcaption></figure>
 </div>
-<div class="code-wrap"><div class="code-bar"><span>utm.tsl</span><span>an app · 35 lines</span></div>
+<div class="code-wrap"><div class="code-bar"><span>examples/gallery/utm/main.tsl</span><span>an app · 35 lines</span></div>
 <pre class="tsl">import cartography
 import geodesy
 
@@ -293,11 +296,12 @@ app Utm(title: "UTM", width: 900, height: 640) {
 <div class="program-head">
 <div>
 <h3><a href="#own-canvas">A map on your own Canvas</a></h3>
-<p>Everything MapView does by hand: resizing the viewport, passing it pointer events, downloading the tiles each new view needs, and clicking to select. A button selects the features in view with <code>featuresIn</code>.</p>
+<p>Everything MapView does by hand: resizing the viewport, passing it pointer events, downloading the tiles each new view needs, and clicking to select. A button selects the places in view with <code>featuresIn</code>.</p>
 <div class="tags"><span>Canvas</span><span>vp.handle</span><span>fetchTiles</span><span>featuresIn</span><span>drawNorthArrow</span></div>
 </div>
+<figure class="shot"><img src="assets/app-own-canvas.jpg" width="1400" height="1039" loading="lazy" alt="The Own canvas window: the world's capitals over OpenStreetMap with a legend, north arrow, scale bar and a Count in view button"><figcaption>The app when it opens</figcaption></figure>
 </div>
-<div class="code-wrap"><div class="code-bar"><span>own-canvas.tsl</span><span>an app · 80 lines</span></div>
+<div class="code-wrap"><div class="code-bar"><span>examples/gallery/own-canvas/main.tsl</span><span>an app · 80 lines</span></div>
 <pre class="tsl">import cartography
 import viewport
 
@@ -307,7 +311,7 @@ import viewport
 fn startingMap() -&gt; cartography.Map {
     var m = cartography.Map()
     m.add(cartography.openStreetMap())
-    if let layers = cartography.readLayers("buildings.gpkg").value() {
+    if let layers = cartography.readLayers("places.geojson").value() {
         for layer in layers {
             m.add(layer)
         }
@@ -391,7 +395,7 @@ app OwnCanvas(title: "Own canvas", width: 900, height: 640) {
 </div>
 <figure class="shot"><img src="assets/world.png" width="2000" height="1040" loading="lazy" alt="The world in Equal Earth, countries colored by continent, with rivers and the largest cities"><figcaption>What it draws</figcaption></figure>
 </div>
-<div class="code-wrap"><div class="code-bar"><span>world.tsl</span><span>a program · 49 lines</span></div>
+<div class="code-wrap"><div class="code-bar"><span>examples/gallery/world/main.tsl</span><span>a program · 49 lines</span></div>
 <pre class="tsl">import cartography
 import geodesy
 
@@ -452,7 +456,7 @@ fn main() {
 </div>
 <figure class="shot"><img src="assets/population.png" width="2000" height="1040" loading="lazy" alt="Population by country in five classes from pale yellow to dark red"><figcaption>What it draws</figcaption></figure>
 </div>
-<div class="code-wrap"><div class="code-bar"><span>choropleth.tsl</span><span>a program · 42 lines</span></div>
+<div class="code-wrap"><div class="code-bar"><span>examples/gallery/choropleth/main.tsl</span><span>a program · 42 lines</span></div>
 <pre class="tsl">import cartography
 import geodesy
 
@@ -506,7 +510,7 @@ fn main() {
 </div>
 <figure class="shot"><img src="assets/terrain.png" width="1400" height="1040" loading="lazy" alt="A DEM colored by height over its hillshade, with labeled contour lines"><figcaption>What it draws</figcaption></figure>
 </div>
-<div class="code-wrap"><div class="code-bar"><span>terrain.tsl</span><span>a program · 46 lines</span></div>
+<div class="code-wrap"><div class="code-bar"><span>examples/gallery/terrain/main.tsl</span><span>a program · 46 lines</span></div>
 <pre class="tsl">import cartography
 
 fn main() {
@@ -564,7 +568,7 @@ fn main() {
 </div>
 <figure class="shot"><img src="assets/gauges.jpg" width="1400" height="933" loading="lazy" alt="Rain gauges near Manila on OpenStreetMap, colored by kind and sized by rainfall"><figcaption>What it draws</figcaption></figure>
 </div>
-<div class="code-wrap"><div class="code-bar"><span>csv-points.tsl</span><span>a program · 44 lines</span></div>
+<div class="code-wrap"><div class="code-bar"><span>examples/gallery/csv-points/main.tsl</span><span>a program · 44 lines</span></div>
 <pre class="tsl">import cartography
 
 // Rain gauges from a CSV file (with lon and lat columns), colored by their
@@ -621,7 +625,7 @@ fn main() {
 <div class="tags"><span>readLayers</span><span>writeLayer</span><span>writeGeoPackage</span><span>extent</span></div>
 </div>
 </div>
-<div class="code-wrap"><div class="code-bar"><span>convert.tsl</span><span>a program · 29 lines</span></div>
+<div class="code-wrap"><div class="code-bar"><span>examples/gallery/convert/main.tsl</span><span>a program · 29 lines</span></div>
 <pre class="tsl">import cartography
 
 // Reads a shapefile (in whatever system its .prj says) and writes it as
@@ -667,7 +671,7 @@ wrote lots.csv</pre></div>
 <div class="tags"><span>newVectorLayer</span><span>addColumn</span><span>addFeature</span><span>Value</span><span>wkt</span><span>geoJSON</span></div>
 </div>
 </div>
-<div class="code-wrap"><div class="code-bar"><span>build-layer.tsl</span><span>a program · 33 lines</span></div>
+<div class="code-wrap"><div class="code-bar"><span>examples/gallery/build-layer/main.tsl</span><span>a program · 33 lines</span></div>
 <pre class="tsl">import cartography
 import geodesy
 
@@ -720,7 +724,7 @@ POINT (500733.1 1615188.9)  3 | BM-3 |
 <div class="tags"><span>rasterStatistics</span><span>rasterHistogram</span><span>sampleRaster</span><span>zonalStatistics</span><span>slope</span><span>writeGeoTIFF</span></div>
 </div>
 </div>
-<div class="code-wrap"><div class="code-bar"><span>raster-stats.tsl</span><span>a program · 55 lines</span></div>
+<div class="code-wrap"><div class="code-bar"><span>examples/gallery/raster-stats/main.tsl</span><span>a program · 55 lines</span></div>
 <pre class="tsl">import cartography
 
 // Numbers from a DEM: its statistics, a histogram, a profile along a
